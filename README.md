@@ -188,3 +188,7 @@ O Gerador é um servidor Node.js sem dependências e uma página em JavaScript p
 | `public/` | a tela: `app.js` (imagens e base), `video.js`, `audio.js`, `app.css` |
 
 Para rodar em outra porta: `PORT=8080 node server.js`.
+
+## Licença
+
+[MIT](LICENSE). Você pode usar, copiar, adaptar e redistribuir o Gerador, inclusive em projetos comerciais, desde que mantenha o aviso de direitos autorais.
