@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gerador</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111'/%3E%3Crect x='7' y='9' width='12' height='16' rx='2' fill='none' stroke='%23fff' stroke-width='2.4'/%3E%3Crect x='14' y='6' width='12' height='12' rx='2' fill='%231f9d55'/%3E%3C/svg%3E">
+  <link rel="preload" href="fonts/instrument-sans.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="composer" id="composer" data-tab="image">
+      <div class="tabs" id="tabs" role="tablist" aria-label="O que gerar"></div>
+      <div class="composer-scroll">
+        <div class="ratios vmodes only-video" id="vmodes" role="radiogroup" aria-label="Como criar o vídeo"></div>
+        <div class="ratios vmodes amodes only-audio" id="amodes" role="radiogroup" aria-label="Que áudio criar"></div>
+        <div class="refs none only-image" id="refs"></div>
+        <div class="vmedia only-video" id="vmedia"></div>
+        <div class="amedia only-audio" id="amedia"></div>
+        <div class="prompt-wrap">
+          <textarea class="prompt" id="prompt" placeholder="Descreva a imagem" spellcheck="true" aria-label="Prompt"></textarea>
+          <button class="prompt-clear" id="prompt-clear" data-act="clear-prompt" data-tip="Limpar" aria-label="Limpar prompt"></button>
+        </div>
+        <div class="lyrics-wrap only-audio" id="lyrics-wrap" hidden>
+          <textarea class="prompt lyrics" id="lyrics" placeholder="Letra (opcional). Sem letra, o modelo escreve uma ou faz só o instrumental. Dá para marcar as partes com [Verse] e [Chorus]." spellcheck="true" aria-label="Letra da música"></textarea>
+        </div>
+        <div class="models" id="models"></div>
+        <div class="ratios" id="ratios" role="radiogroup" aria-label="Proporção"></div>
+        <div class="seg-row only-image">
+          <div class="seg" id="tiers" role="radiogroup" aria-label="Qualidade"></div>
+          <div class="seg count" id="count" role="radiogroup" aria-label="Quantidade"></div>
+        </div>
+        <div class="seg-row wrap only-video">
+          <div class="seg" id="vres" role="radiogroup" aria-label="Resolução"></div>
+          <button class="toggle" id="vaudio" data-act="v-audio"></button>
+          <div class="vdur" id="vdur">
+            <label for="vdur-range">Duração</label>
+            <input class="range" id="vdur-range" type="range" step="1" aria-label="Duração em segundos">
+            <input class="vdur-num num" id="vdur-num" type="number" step="1" inputmode="numeric" aria-label="Duração em segundos">
+            <span class="vdur-unit">s</span>
+          </div>
+          <p class="vdur-note" id="vdur-note"></p>
+        </div>
+        <div class="seg-row wrap aopts only-audio" id="aopts"></div>
+      </div>
+      <div class="go-bar">
+        <button class="go" id="go" data-act="generate"><span id="go-icon"></span><span id="go-label">Gerar</span><span class="est" id="go-est"></span></button>
+      </div>
+      <input type="file" id="file-input" accept="image/*" multiple hidden>
+      <input type="file" id="vfile-input" hidden>
+      <input type="file" id="tool-file" accept="image/*,video/*" hidden>
+      <input type="file" id="afile-input" accept="audio/*,video/mp4,video/quicktime,video/webm,.m4a,.mp3,.wav,.ogg,.flac,.opus,.aac" hidden>
+    </aside>
+
+    <main class="stream" id="stream">
+      <header class="bar">
+        <label class="tl-search"><input id="tl-search" type="search" placeholder="Buscar no histórico" autocomplete="off" spellcheck="false" aria-label="Buscar no histórico"></label>
+        <button class="balance" id="balance"></button>
+        <button class="icon-btn" id="settings-btn" data-act="open-settings" data-tip="Configurações" aria-label="Configurações"></button>
+      </header>
+      <div class="timeline" id="timeline"></div>
+    </main>
+  </div>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <script src="app.js"></script>
+  <script src="video.js"></script>
+  <script src="audio.js"></script>
+  <script>boot();</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+# Seus dados: API key, histórico e tudo o que foi gerado. Nunca vai para o GitHub.
+data/
+
+# Configuração local de quem desenvolve
+.claude/
+node_modules/
+
+# Lixo do sistema
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini
+*.antes-do-gerador

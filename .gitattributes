@@ -1,0 +1,4 @@
+# Os .bat precisam das quebras de linha do Windows, inclusive em quem baixa o ZIP
+*.bat -text
+# Os .command do Mac precisam das quebras de linha do Unix
+*.command text eol=lf

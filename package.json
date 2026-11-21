@@ -1,0 +1,8 @@
+{
+  "name": "gerador-imgs",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Estúdio local de geração de imagens e vídeos com o Atlas Cloud",
+  "scripts": { "start": "node server.js", "mcp": "node mcp.js" },
+  "engines": { "node": ">=18" }
+}
