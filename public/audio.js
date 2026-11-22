@@ -21,15 +21,17 @@ function loadAudio() {
   if (!AMODES.some((m) => m.key === S.a.mode)) S.a.mode = 'speech';
   S.a.prompts = S.a.prompts || {};
   S.a.touched = S.a.touched || {};
+  S.a.myVoices = S.a.myVoices || {}; // por modelo: vozes acrescentadas pelo ID (ex.: clonadas no ElevenLabs)
+  S.a.cloned = Array.isArray(S.a.cloned) ? S.a.cloned : []; // vozes clonadas de um áudio enviado
 }
 
 let aSaveT;
 function saveAudio() {
   clearTimeout(aSaveT);
   aSaveT = setTimeout(() => {
-    const { prompt, prompts, touched, mode, lyrics, voices, speed, lang, instrumental, duration, sfxDuration, loop, input, families } = S.a;
+    const { prompt, prompts, touched, mode, lyrics, voices, myVoices, cloned, speed, lang, instrumental, duration, sfxDuration, loop, input, families } = S.a;
     try {
-      localStorage.setItem(ASTORE, JSON.stringify({ prompt, prompts, touched, mode, lyrics, voices, speed, lang, instrumental, duration, sfxDuration, loop, families, input: input && !input.uploading ? input : null }));
+      localStorage.setItem(ASTORE, JSON.stringify({ prompt, prompts, touched, mode, lyrics, voices, myVoices, cloned, speed, lang, instrumental, duration, sfxDuration, loop, families, input: input && !input.uploading ? input : null }));
     } catch { /* sem espaço: segue sem lembrar */ }
   }, 200);
 }
@@ -148,16 +150,25 @@ function renderALyrics() {
 }
 
 const GENDER = { female: 'feminina', male: 'masculina', neutral: 'neutra' };
-function voiceLabel(v) {
-  const name = v.name || String(v.v).replace(/[_-]+/g, ' ');
-  const lang = v.lang === 'multilingual' ? 'vários idiomas' : v.lang;
-  return [name, GENDER[String(v.gender).toLowerCase()], lang].filter(Boolean).join(' · ');
-}
-const aVoiceOf = (f) => (f.caps?.voice ? S.a.voices[f.key] ?? f.caps.voice.default : null);
-function aVoiceName(key, value) {
+const aHasVoice = (f) => !!(f.caps?.voice || f.caps?.voiceFromAudio);
+// A voz escolhida para um modelo: uma da lista dele, um ID acrescentado à mão ou "ref:<id>" (clonada de um áudio)
+const aVoiceOf = (f) => (aHasVoice(f) ? S.a.voices[f.key] ?? f.caps.voice?.default ?? null : null);
+// Nome, detalhe e amostra de uma voz, venha de onde vier
+function aVoiceInfo(key, value) {
+  if (value == null || value === '') return { name: 'Sem voz definida', detail: 'o texto descreve a voz', sample: '' };
+  if (typeof value === 'string' && value.startsWith('ref:')) {
+    const c = S.a.cloned.find((x) => `ref:${x.id}` === value);
+    return { name: c ? c.name : 'Voz clonada', detail: 'clonada de um áudio', sample: c ? c.url : '' };
+  }
   const v = S.afam.get(key)?.caps?.voice?.list.find((x) => x.v === value);
-  return v ? v.name || String(v.v).replace(/[_-]+/g, ' ') : String(value);
+  if (v) {
+    const lang = v.lang === 'multilingual' ? 'vários idiomas' : v.lang;
+    return { name: v.name || String(v.v).replace(/[_-]+/g, ' '), detail: [GENDER[String(v.gender).toLowerCase()], lang].filter(Boolean).join(' · '), sample: v.sample || '' };
+  }
+  const mine = (S.a.myVoices[key] || []).find((x) => x.v === value);
+  return { name: mine ? mine.name : String(value), detail: 'voz pelo ID', sample: '' };
 }
+const aVoiceName = (key, value) => aVoiceInfo(key, value).name;
 
 const aClock = (sec) => { const s = Math.max(0, Math.round(sec)); return s < 60 ? `${s} s` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 const aSpeedText = (v) => `${Number(v).toFixed(2).replace(/0$/, '').replace('.', ',')}×`;
@@ -177,13 +188,13 @@ function renderAOpts() {
   const langs = `<div class="seg" role="radiogroup" aria-label="Idioma">${ALANGS.map(([k, label, hint]) => `<button class="${S.a.lang === k ? 'on' : ''}" role="radio" aria-checked="${S.a.lang === k}" data-act="a-lang" data-v="${k}" ${hint ? tip(hint) : ''}>${label}</button>`).join('')}</div>`;
   let html = '';
   if (mode === 'speech') {
-    const withVoice = fams.filter((f) => f.caps?.voice);
+    const withVoice = fams.filter(aHasVoice);
     if (withVoice.length) {
       html += `<div class="avoices">${withVoice.map((f) => {
-        const cur = aVoiceOf(f);
+        const info = aVoiceInfo(f.key, aVoiceOf(f));
         return `<div class="avoice"><span class="avoice-model">${avatarHTML(f.key, f.name, f.avatar)}<span>${esc(f.name)}</span></span>
-          <select class="aselect" data-a="voice" data-key="${esc(f.key)}" aria-label="Voz do ${esc(f.name)}">${f.caps.voice.list.map((v) => `<option value="${esc(v.v)}"${v.v === cur ? ' selected' : ''}>${esc(voiceLabel(v))}</option>`).join('')}</select>
-          <button class="icon-btn" data-act="a-sample" data-key="${esc(f.key)}" ${tip('Ouvir uma amostra desta voz')}>${svg('play', 's14')}</button></div>`;
+          <button class="avoice-pick" data-act="vp-open" data-key="${esc(f.key)}" ${tip('Escolher a voz: lista com amostras, voz pelo ID e voz clonada')}><span class="avoice-name">${esc(info.name)}</span><span class="avoice-detail">${esc(info.detail)}</span>${svg('chevR', 's14')}</button>
+          <button class="icon-btn" data-act="a-sample" data-key="${esc(f.key)}" ${info.sample ? tip('Ouvir uma amostra desta voz') : 'disabled'}>${svg('play', 's14')}</button></div>`;
       }).join('')}</div>`;
     }
     if (fams.some((f) => f.caps?.speed)) html += slider('a-speed', 'Velocidade', 0.5, 2, 0.05, S.a.speed, aSpeedText(S.a.speed));
@@ -221,7 +232,6 @@ function renderAGo() {
   let est = 0;
   for (const f of fams) est += aEstimate(f) || 0;
   $('#go-icon').innerHTML = svg(mode === 'stt' ? 'fileText' : 'sparkles', 's16');
-  $('#go-est').textContent = est > 0 ? `≈ ${cost(est)}` : '';
   let reason = '';
   if (!S.config.hasKey) reason = 'Configure a API key primeiro';
   else if (mode === 'stt' && !S.a.input) reason = 'Adicione o áudio';
@@ -229,7 +239,23 @@ function renderAGo() {
   else if (mode !== 'stt' && !S.a.prompt.trim()) reason = mode === 'speech' ? 'Escreva o texto' : 'Escreva a descrição';
   else if (!fams.length) reason = 'Escolha um modelo';
   btn.disabled = !!reason && S.config.hasKey;
-  btn.dataset.tip = reason || `${mode === 'stt' ? 'Transcrever' : 'Gerar'} (${MOD} + Enter)${est > 0 ? `, custo estimado ${cost(est)}` : ''}`;
+  // a cotação vem do Atlas; na fala o preço depende do tamanho do texto, então ele entra na conta
+  const ready = fams.length && (mode === 'stt' ? S.a.input && !S.a.input.uploading : S.a.prompt.trim());
+  askEstimate('/api/audio/estimate', ready ? aRequestBody(fams) : null, 700);
+  paintEstimate(fams.map((f) => f.key), est, reason, mode === 'stt' ? 'Transcrever' : 'Gerar');
+}
+
+// O pedido de áudio como o servidor espera (o mesmo corpo serve para estimar e para gerar)
+function aRequestBody(fams = aSelected()) {
+  const a = S.a;
+  const voices = {};
+  for (const f of fams) { const v = aVoiceOf(f); if (v) voices[f.key] = v; }
+  return {
+    mode: a.mode, prompt: a.prompt.trim(), lyrics: a.instrumental ? '' : a.lyrics, voices, speed: a.speed, lang: a.lang,
+    instrumental: a.instrumental, loop: a.loop, input: a.input?.id,
+    duration: a.mode === 'sfx' ? a.sfxDuration : a.mode === 'music' && aDurRange(fams) ? a.duration : 0,
+    families: fams.map((f) => f.key),
+  };
 }
 
 /* ---------- ações ---------- */
@@ -238,21 +264,9 @@ async function aGenerate() {
   const btn = $('#go');
   if (!S.config.hasKey) return openSettings(true);
   if (btn.disabled) { toast(btn.dataset.tip, 'error'); return; }
-  const a = S.a;
-  const fams = aSelected();
   btn.classList.remove('sent'); void btn.offsetWidth; btn.classList.add('sent');
-  const voices = {};
-  for (const f of fams) if (f.caps?.voice) voices[f.key] = aVoiceOf(f);
   try {
-    const b = await api('/api/audio/generate', {
-      method: 'POST',
-      body: {
-        mode: a.mode, prompt: a.prompt.trim(), lyrics: a.instrumental ? '' : a.lyrics, voices, speed: a.speed, lang: a.lang,
-        instrumental: a.instrumental, loop: a.loop, input: a.input?.id,
-        duration: a.mode === 'sfx' ? a.sfxDuration : a.mode === 'music' && aDurRange(fams) ? a.duration : 0,
-        families: fams.map((f) => f.key),
-      },
-    });
+    const b = await api('/api/audio/generate', { method: 'POST', body: aRequestBody() });
     upsertBatch(b);
     $('#stream').scrollTo({ top: 0, behavior: 'smooth' });
   } catch (e) { toast(e.message, 'error'); }
@@ -315,7 +329,7 @@ function aBatchMeta(b) {
   const done = b.items.filter((x) => x.status === 'done' && x.cost != null);
   const total = done.reduce((a, x) => a + x.cost, 0);
   const est = done.some((x) => x.costEstimated);
-  if (done.length || running) parts.push(`<span class="m cost" ${tip(est ? 'Custo estimado pelo preço da tabela' : 'Custo cobrado pelo Atlas Cloud')}>${running ? '<span class="mini-spin"></span>' : ''}${done.length ? `${est ? '≈ ' : ''}${cost(total)}` : ''}</span>`);
+  if (done.length || running) parts.push(`<span class="m cost" ${tip(est ? COST_TIP_EST : COST_TIP)}>${running ? '<span class="mini-spin"></span>' : ''}${done.length ? `${est ? '≈ ' : ''}${costHTML(total)}` : ''}</span>`);
   return parts.join('');
 }
 
@@ -330,7 +344,7 @@ function aTileSpecs(b, it) {
   return specs;
 }
 
-const aCost = (it, per) => (per != null ? `<span class="a-cost num">${it.costEstimated ? '≈ ' : ''}${cost(per)}</span>` : '<span></span>');
+const aCost = (it, per) => (per != null ? `<span class="a-cost num">${it.costEstimated ? '≈ ' : ''}${costHTML(per)}</span>` : '<span></span>');
 
 function aTileHTML(it, out, idx, per) {
   return `<div class="tile done audio" data-item="${it.id}" data-idx="${idx}">
@@ -391,26 +405,171 @@ for (const ev of ['loadedmetadata', 'durationchange', 'timeupdate', 'play', 'pau
   document.addEventListener(ev, (e) => { if (e.target.matches?.('.tile.audio audio')) aPaint(e.target); }, true);
 }
 
-// Amostra da voz escolhida (arquivo de exemplo publicado pelo próprio Atlas Cloud)
+// Amostra de uma voz: o arquivo de exemplo publicado pelo Atlas Cloud ou, nas vozes clonadas, o áudio enviado.
+// Um clique toca; outro clique no mesmo botão para.
 let aSample = null;
-function aPlaySample(key, btn) {
-  const f = S.afam.get(key);
-  const cur = f ? aVoiceOf(f) : null;
-  const v = f?.caps?.voice?.list.find((x) => x.v === cur);
+function aPlayUrl(url, btn, size = 's14') {
   const was = aSample;
-  if (was) { was.pause(); if (was._id === `${key}|${cur}`) return; }
-  if (!v?.sample) { toast('Essa voz não tem amostra'); return; }
+  if (was) { was.pause(); if (was._btn === btn) return; }
+  if (!url) { toast('Essa voz não tem amostra'); return; }
   if (aNow) aNow.pause();
-  const au = new Audio(v.sample);
-  au._id = `${key}|${cur}`;
+  const au = new Audio(url);
+  au._btn = btn;
   aSample = au;
-  btn.innerHTML = svg('pause', 's14');
-  const stop = () => { if (aSample === au) aSample = null; if (btn.isConnected) btn.innerHTML = svg('play', 's14'); };
+  btn.innerHTML = svg('pause', size);
+  btn.classList.add('playing');
+  const stop = () => { if (aSample === au) aSample = null; if (btn.isConnected) { btn.innerHTML = svg('play', size); btn.classList.remove('playing'); } };
   au.addEventListener('ended', stop);
   au.addEventListener('pause', stop);
   au.addEventListener('error', () => { stop(); toast('Não consegui tocar a amostra', 'error'); });
   au.play().catch(() => {});
 }
+function aPlaySample(key, btn) {
+  const f = S.afam.get(key);
+  aPlayUrl(f ? aVoiceInfo(key, aVoiceOf(f)).sample : '', btn);
+}
+
+/* ---------- painel de vozes ---------- */
+
+// Lista as vozes de um modelo com amostra para ouvir, busca e filtros. Nos modelos que aceitam, também
+// deixa usar uma voz pelo ID (clonada no ElevenLabs) ou clonar a voz de um áudio enviado.
+const VP = {
+  key: null, q: '', gender: 'all', lang: 'all', el: null,
+
+  open(key) {
+    this.close();
+    const f = S.afam.get(key);
+    if (!f || !aHasVoice(f)) return;
+    Object.assign(this, { key, q: '', gender: 'all', lang: 'all' });
+    const el = document.createElement('div');
+    el.className = 'vp-scrim';
+    el.innerHTML = `<div class="vp" role="dialog" aria-modal="true" aria-label="Escolher a voz">
+      <div class="vp-head"><span class="vp-title">${avatarHTML(f.key, f.name, f.avatar)}<span>Voz do ${esc(f.name)}</span></span><button class="icon-btn" data-act="vp-close" ${tip('Fechar (Esc)')}>${svg('x', 's20')}</button></div>
+      <div class="vp-tools"></div>
+      <div class="vp-list" role="listbox"></div>
+      <div class="vp-extra"></div>
+    </div>`;
+    document.body.appendChild(el);
+    this.el = el;
+    el.addEventListener('mousedown', (e) => { if (e.target === el) this.close(); });
+    this.renderTools();
+    this.render();
+    setTimeout(() => $('.vp-search', el)?.focus(), 40);
+  },
+
+  close() {
+    if (!this.el) return;
+    if (aSample) aSample.pause();
+    this.el.remove();
+    this.el = null;
+    this.key = null;
+    hideTip();
+  },
+
+  renderTools() {
+    const f = S.afam.get(this.key);
+    const list = f.caps.voice ? f.caps.voice.list : [];
+    const box = $('.vp-tools', this.el);
+    if (list.length < 8) { box.innerHTML = ''; return; }
+    const langs = [...new Set(list.map((v) => v.lang).filter(Boolean))].sort();
+    const genders = new Set(list.map((v) => String(v.gender).toLowerCase()).filter(Boolean));
+    box.innerHTML = `<input class="input vp-search" type="search" placeholder="Buscar entre ${list.length} vozes" autocomplete="off" spellcheck="false" aria-label="Buscar voz">
+      ${genders.size > 1 ? `<div class="seg">${[['all', 'Todas'], ['female', 'Femininas'], ['male', 'Masculinas']].map(([k, label]) => `<button class="${this.gender === k ? 'on' : ''}" data-act="vp-gender" data-v="${k}">${label}</button>`).join('')}</div>` : ''}
+      ${langs.length > 1 ? `<select class="aselect vp-lang" aria-label="Idioma da voz"><option value="all">Todos os idiomas</option>${langs.map((l) => `<option value="${esc(l)}"${this.lang === l ? ' selected' : ''}>${esc(l === 'multilingual' ? 'vários idiomas' : l)}</option>`).join('')}</select>` : ''}`;
+    $('.vp-search', box).addEventListener('input', (e) => { this.q = e.target.value.trim().toLowerCase(); this.render(); });
+    $('.vp-lang', box)?.addEventListener('change', (e) => { this.lang = e.target.value; this.render(); });
+  },
+
+  row(value, name, detail, sample, cur, removable) {
+    const on = value === cur;
+    return `<div class="vp-row ${on ? 'on' : ''}" data-act="vp-pick" data-v="${esc(value)}" role="option" aria-selected="${on}" tabindex="0">
+      <button class="vp-play" data-act="vp-play" data-url="${esc(sample || '')}" ${sample ? tip('Ouvir a amostra') : 'disabled'}>${svg('play', 's14')}</button>
+      <span class="vp-name">${esc(name)}</span><span class="vp-detail">${esc(detail)}</span>
+      ${removable ? `<button class="vp-rm" data-act="vp-rm" data-kind="${removable}" data-v="${esc(value)}" ${tip('Tirar da lista')}>${svg('x', 's14')}</button>` : ''}
+      <span class="vp-check">${on ? svg('check', 's16') : ''}</span>
+    </div>`;
+  },
+
+  render() {
+    if (!this.el) return;
+    const f = S.afam.get(this.key);
+    const cur = aVoiceOf(f) || '';
+    const voice = f.caps.voice;
+    let list = voice ? voice.list : [];
+    if (this.gender !== 'all') list = list.filter((v) => String(v.gender).toLowerCase() === this.gender);
+    if (this.lang !== 'all') list = list.filter((v) => v.lang === this.lang);
+    if (this.q) list = list.filter((v) => `${v.name} ${v.v} ${v.lang} ${GENDER[String(v.gender).toLowerCase()] || ''}`.toLowerCase().includes(this.q));
+    const rows = list.map((v) => { const i = aVoiceInfo(f.key, v.v); return this.row(v.v, i.name, i.detail, i.sample, cur); });
+    if (!voice) rows.unshift(this.row('', 'Sem voz definida', 'o próprio texto descreve quem fala', '', cur));
+    $('.vp-list', this.el).innerHTML = rows.join('') || '<p class="vp-empty">Nenhuma voz combina com a busca.</p>';
+
+    let extra = '';
+    if (voice && voice.custom) {
+      const mine = S.a.myVoices[f.key] || [];
+      extra += `<div class="vp-section"><b>Voz clonada ou da biblioteca do ElevenLabs</b>
+        <p>A clonagem é feita no site do ElevenLabs (em Voices). Cole aqui o ID da voz: o Atlas Cloud repassa o ID ao ElevenLabs como está.</p>
+        ${mine.map((v) => this.row(v.v, v.name, `ID ${v.v}`, '', cur, 'id')).join('')}
+        <form class="vp-form" data-form="id"><input class="input" name="name" placeholder="Nome (ex.: Minha voz)" maxlength="40" autocomplete="off"><input class="input" name="id" placeholder="ID da voz" maxlength="80" autocomplete="off" spellcheck="false"><button class="btn line" type="submit">Adicionar</button></form></div>`;
+    }
+    if (f.caps.voiceFromAudio) {
+      extra += `<div class="vp-section"><b>Clonar a voz de um áudio</b>
+        <p>Envie de 5 a 30 segundos de uma voz só, sem música de fundo. O modelo imita a voz e o jeito de falar da amostra.</p>
+        ${S.a.cloned.map((c) => this.row(`ref:${c.id}`, c.name, 'clonada de um áudio', c.url, cur, 'clone')).join('')}
+        <button class="btn line" data-act="vp-clone">${svg('mic', 's16')}Enviar uma amostra de voz</button></div>`;
+    }
+    $('.vp-extra', this.el).innerHTML = extra;
+    const form = $('.vp-form', this.el);
+    if (form) form.addEventListener('submit', (e) => { e.preventDefault(); this.addId(form); });
+  },
+
+  pick(value) {
+    const f = S.afam.get(this.key);
+    if (value === '' || (f.caps.voice && value === f.caps.voice.default)) delete S.a.voices[this.key]; else S.a.voices[this.key] = value;
+    saveAudio();
+    this.close();
+    renderAOpts(); renderAGo();
+  },
+
+  addId(form) {
+    const id = form.elements.id.value.trim();
+    const name = form.elements.name.value.trim() || `Voz ${id.slice(0, 6)}`;
+    if (!/^[\w-]{6,80}$/.test(id)) { toast('O ID da voz tem letras e números, sem espaços (copie do site do ElevenLabs)', 'error'); form.elements.id.focus(); return; }
+    const list = (S.a.myVoices[this.key] = S.a.myVoices[this.key] || []);
+    if (!list.some((v) => v.v === id)) list.push({ v: id, name });
+    S.a.voices[this.key] = id;
+    saveAudio();
+    this.render();
+    renderAOpts(); renderAGo();
+    toast('Voz adicionada e escolhida', 'ok');
+  },
+
+  remove(kind, value) {
+    if (kind === 'id') S.a.myVoices[this.key] = (S.a.myVoices[this.key] || []).filter((v) => v.v !== value);
+    else S.a.cloned = S.a.cloned.filter((c) => `ref:${c.id}` !== value);
+    for (const [k, v] of Object.entries(S.a.voices)) if (v === value && (kind === 'clone' || k === this.key)) delete S.a.voices[k];
+    saveAudio();
+    this.render();
+    renderAOpts(); renderAGo();
+  },
+
+  async clone(file) {
+    if (!file || !this.el) return;
+    if (!/^(audio|video)\//.test(file.type) && !/\.(mp3|wav|m4a|ogg|flac|opus|aac|mp4|mov|webm)$/i.test(file.name || '')) { toast('Escolha um arquivo de áudio', 'error'); return; }
+    const key = this.key;
+    toast('Enviando a amostra…');
+    try {
+      const ref = await api('/api/refs', { method: 'POST', raw: file, headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-Filename': encodeURIComponent(file.name || 'voz.mp3') } });
+      if (ref.kind === 'image') throw new Error('Esse arquivo é uma imagem. Envie um áudio.');
+      const name = String(file.name || 'Voz clonada').replace(/\.[^.]+$/, '').slice(0, 40) || 'Voz clonada';
+      if (!S.a.cloned.some((c) => c.id === ref.id)) S.a.cloned.push({ id: ref.id, name, url: ref.url });
+      S.a.voices[key] = `ref:${ref.id}`;
+      saveAudio();
+      if (this.key === key) this.render();
+      renderAOpts(); renderAGo();
+      toast('Voz clonada e escolhida', 'ok');
+    } catch (e) { toast(e.message, 'error'); }
+  },
+};
 
 /* ---------- eventos ---------- */
 
@@ -437,6 +596,17 @@ document.addEventListener('click', (e) => {
     case 'a-pick': $('#afile-input').click(); break;
     case 'a-rm-input': S.a.input = null; renderAMedia(); renderAGo(); saveAudio(); break;
     case 'a-sample': aPlaySample(t.dataset.key, t); break;
+    case 'vp-open': VP.open(t.dataset.key); break;
+    case 'vp-close': VP.close(); break;
+    case 'vp-play': aPlayUrl(t.dataset.url, t); break;
+    case 'vp-pick': VP.pick(t.dataset.v); break;
+    case 'vp-rm': VP.remove(t.dataset.kind, t.dataset.v); break;
+    case 'vp-clone': $('#vp-file').click(); break;
+    case 'vp-gender':
+      VP.gender = t.dataset.v;
+      for (const b of t.parentElement.children) b.classList.toggle('on', b === t);
+      VP.render();
+      break;
     case 'a-play': aToggle(t.closest('.tile')); break;
     case 'a-seek': {
       const au = t.closest('.tile')?.querySelector('audio');
@@ -474,11 +644,12 @@ $('#aopts').addEventListener('input', (e) => {
   renderAGo();
   saveAudio();
 });
-$('#aopts').addEventListener('change', (e) => {
-  if (e.target.dataset.a !== 'voice') return;
-  S.a.voices[e.target.dataset.key] = e.target.value;
-  if (aSample) aSample.pause();
-  saveAudio();
-});
+$('#vp-file').addEventListener('change', (e) => { VP.clone(e.target.files[0]); e.target.value = ''; });
+// com o painel de vozes aberto: Esc fecha, Enter ou espaço escolhe a voz em foco
+document.addEventListener('keydown', (e) => {
+  if (!VP.el) return;
+  if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); VP.close(); }
+  else if ((e.key === 'Enter' || e.key === ' ') && e.target.matches?.('.vp-row')) { e.preventDefault(); VP.pick(e.target.dataset.v); }
+}, true);
 $('#lyrics').addEventListener('input', (e) => { S.a.lyrics = e.target.value; saveAudio(); });
 $('#afile-input').addEventListener('change', (e) => { aAddFiles(e.target.files); e.target.value = ''; });

@@ -70,8 +70,77 @@ const tip = (t) => `data-tip="${esc(t)}" aria-label="${esc(t)}"`;
 
 const moneyFmt2 = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const moneyFmt3 = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 3 });
-const money = (v) => (v == null || !Number.isFinite(v) ? '—' : moneyFmt2.format(v));
-const cost = (v) => (v == null || !Number.isFinite(v) ? '—' : moneyFmt3.format(v));
+const brlFmt2 = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const brlFmt3 = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', minimumFractionDigits: 2, maximumFractionDigits: 3 });
+
+// Os valores do Atlas são em dólar. Nas Configurações dá para ver em reais ('brl') ou nos dois ('both':
+// dólar e, entre parênteses e com menos destaque, reais). Sem cotação disponível, fica em dólar.
+function currencyMode() {
+  const m = S.config.currency;
+  return (m === 'brl' || m === 'both') && S.config.fx && S.config.fx.rate > 0 ? m : 'usd';
+}
+// fine: valores pequenos (custo de uma geração) ganham a terceira casa
+function formatMoney(v, fine, html) {
+  if (v == null || !Number.isFinite(v)) return '—';
+  const usd = (fine ? moneyFmt3 : moneyFmt2).format(v);
+  const mode = currencyMode();
+  if (mode === 'usd') return usd;
+  const r = v * S.config.fx.rate;
+  const brl = (fine && r < 0.095 ? brlFmt3 : brlFmt2).format(r);
+  if (mode === 'brl') return brl;
+  return html ? `${usd} <small class="brl">(${brl})</small>` : `${usd} (${brl})`;
+}
+const money = (v) => formatMoney(v, false, false);
+const cost = (v) => formatMoney(v, true, false);
+// as versões HTML diminuem o destaque do valor em reais quando os dois aparecem
+const moneyHTML = (v) => formatMoney(v, false, true);
+const costHTML = (v) => formatMoney(v, true, true);
+
+/* ---------- estimativa de custo antes de gerar ---------- */
+
+// O servidor pergunta ao Atlas quanto o pedido custaria (isso não gera nem cobra nada). Enquanto a resposta
+// não chega, o botão mostra "calculando"; se o Atlas não souber dizer, vale a conta pela tabela, com ≈.
+const EST = { sig: '', timer: null, seq: 0, quote: null, loading: false, tries: 0 };
+
+function askEstimate(url, body, wait = 450) {
+  const sig = JSON.stringify([url, S.config.hasKey, body]);
+  if (sig === EST.sig) return;
+  EST.sig = sig;
+  clearTimeout(EST.timer);
+  EST.seq++;
+  EST.quote = null;
+  EST.tries = 0;
+  EST.loading = !!body && S.config.hasKey;
+  if (!EST.loading) return;
+  const run = (delay) => {
+    EST.timer = setTimeout(async () => {
+      const seq = ++EST.seq;
+      let r = null;
+      try { r = await api(url, { method: 'POST', body }); } catch { /* fica na conta pela tabela */ }
+      if (seq !== EST.seq) return;
+      EST.quote = r ? r.items || null : null;
+      // o Atlas precisa de um arquivo que ainda está subindo: o servidor já começou o envio, pergunta de novo
+      if (r && r.pending && EST.tries < 10) { EST.tries++; run(2500); } else EST.loading = false;
+      renderGo();
+    }, delay);
+  };
+  run(wait);
+}
+
+// keys: modelos que vão gerar; tableTotal: a conta pela tabela, usada se a cotação falhar
+function paintEstimate(keys, tableTotal, reason, verb = 'Gerar') {
+  const q = EST.quote;
+  const quoted = !!q && keys.length > 0 && keys.every((k) => q.some((x) => x.key === k && x.price != null));
+  let total = tableTotal; let exact = false;
+  if (quoted) { total = 0; exact = true; for (const k of keys) { const x = q.find((y) => y.key === k); total += x.price; if (!x.exact) exact = false; } }
+  const el = $('#go-est');
+  const waiting = EST.loading && !quoted;
+  if (!keys.length || !(total > 0)) el.textContent = '';
+  else if (waiting) el.innerHTML = '<span class="mini-spin"></span>';
+  else el.innerHTML = `${exact ? '' : '≈ '}${costHTML(total)}`;
+  const how = waiting ? ', calculando o custo…' : total > 0 ? `, custo ${exact ? 'calculado pelo Atlas Cloud' : quoted ? 'estimado pelo Atlas Cloud' : 'estimado pela tabela (o cobrado pode ser maior)'}: ${cost(total)}` : '';
+  $('#go').dataset.tip = reason || `${verb} (${MOD} + Enter)${how}`;
+}
 
 function dayKey(ts) {
   const d = new Date(ts);
@@ -384,17 +453,19 @@ function renderGo() {
   const fams = runnable();
   const hasRefs = S.c.refs.length > 0;
   const n = fams.length === 1 ? S.c.count : 1;
-  let est = 0; let known = true;
-  for (const f of fams) { const p = pickVariant(f, hasRefs)?.price; if (p == null) known = false; else est += p * n; }
+  let est = 0;
+  for (const f of fams) est += (pickVariant(f, hasRefs)?.price || 0) * n;
   $('#go-icon').innerHTML = svg('sparkles', 's16');
-  $('#go-est').textContent = fams.length && est > 0 ? `${known ? '' : '+'}${cost(est)}` : '';
   let reason = '';
   if (!S.config.hasKey) reason = 'Configure a API key primeiro';
   else if (!S.c.prompt.trim()) reason = 'Escreva um prompt';
   else if (!S.c.families.length) reason = 'Escolha um modelo';
   else if (!fams.length) reason = hasRefs ? 'Os modelos escolhidos não aceitam referência' : 'Os modelos escolhidos precisam de referência';
   btn.disabled = !!reason && S.config.hasKey;
-  btn.dataset.tip = reason || `Gerar (${MOD} + Enter)${est > 0 ? `, custo estimado ${cost(est)}` : ''}`;
+  // o preço muda com a qualidade e a proporção: quem responde é o Atlas, não a tabela
+  const keys = fams.map((f) => f.key);
+  askEstimate('/api/estimate', keys.length ? { refs: S.c.refs.filter((r) => !r.uploading).map((r) => r.id), families: keys, ratio: S.c.ratio, tier: S.c.tier, count: S.c.count } : null);
+  paintEstimate(keys, est, reason);
 }
 
 function renderComposer() {
@@ -542,7 +613,7 @@ function updateDayStats(key) {
       if (it.costEstimated) est = true;
     }
   }
-  $('.d-cost', sec).textContent = imgs ? `${est ? '≈ ' : ''}${cost(total)}` : '';
+  $('.d-cost', sec).innerHTML = imgs ? `${est ? '≈ ' : ''}${costHTML(total)}` : '';
   $('.d-cost', sec).dataset.tip = 'Gasto do dia';
   $('.d-count', sec).innerHTML = imgs ? `${svg(S.tab === 'video' ? 'film' : S.tab === 'audio' ? 'music' : 'image', 's14')}${imgs}` : '';
 }
@@ -572,6 +643,9 @@ function createBatchEl(b) {
   return art;
 }
 
+const COST_TIP = 'Custo cobrado pelo Atlas Cloud';
+const COST_TIP_EST = 'Custo previsto: o Atlas Cloud ainda não informou o valor cobrado';
+
 // Marca as gerações pedidas por um agente de IA (MCP)
 function agentMark(b) {
   if (b.via !== 'mcp') return '';
@@ -594,7 +668,7 @@ function batchMeta(b) {
   const total = done.reduce((a, i) => a + i.cost, 0);
   const est = done.some((i) => i.costEstimated);
   if (done.length || running) {
-    parts.push(`<span class="m cost" ${tip(est ? 'Custo estimado pelo preço da tabela' : 'Custo cobrado pelo Atlas Cloud')}>${running ? '<span class="mini-spin"></span>' : ''}${done.length ? `${est ? '≈ ' : ''}${cost(total)}` : ''}</span>`);
+    parts.push(`<span class="m cost" ${tip(est ? COST_TIP_EST : COST_TIP)}>${running ? '<span class="mini-spin"></span>' : ''}${done.length ? `${est ? '≈ ' : ''}${costHTML(total)}` : ''}</span>`);
   }
   return parts.join('');
 }
@@ -633,7 +707,7 @@ function tileSpecs(b) {
           make: () => (b.kind === 'video' ? vTileHTML(b, it, out, idx, multi ? badge : '', per) : `<div class="tile done" style="aspect-ratio:${tileRatio(b, it, out)}" data-act="open" data-item="${it.id}" data-idx="${idx}" draggable="true" tabindex="0">
             <img src="${esc(out.url)}" alt="" loading="lazy" draggable="false">
             ${multi ? badge : ''}
-            ${it.edited ? `<span class="tcost">${svg('crop', 's14')}Editada</span>` : per != null ? `<span class="tcost num">${it.costEstimated ? '≈ ' : ''}${cost(per)}</span>` : ''}
+            ${it.edited ? `<span class="tcost">${svg('crop', 's14')}Editada</span>` : per != null ? `<span class="tcost num">${it.costEstimated ? '≈ ' : ''}${costHTML(per)}</span>` : ''}
             <div class="tools">
               <button data-act="use-ref" data-item="${it.id}" data-idx="${idx}" ${tip('Usar como referência')}>${svg('imageUp')}</button>
               <button data-act="copy-img" data-item="${it.id}" data-idx="${idx}" ${tip('Copiar imagem')}>${svg('copy')}</button>
@@ -1264,7 +1338,7 @@ function renderBalance() {
   const v = S.balance.value;
   const low = v != null && v < 1;
   el.className = `balance${S.balanceLoading ? ' loading' : ''}${S.balance.error && v == null ? ' warn' : ''}${low ? ' low' : ''}`;
-  el.innerHTML = `<span class="dot"></span><span class="val">${v == null ? '—' : money(v)}</span>`;
+  el.innerHTML = `<span class="dot"></span><span class="val">${v == null ? '—' : moneyHTML(v)}</span>`;
   el.dataset.tip = S.balance.error ? S.balance.error : low ? 'Saldo baixo no Atlas Cloud: recarregue para continuar gerando' : 'Saldo no Atlas Cloud';
   el.setAttribute('aria-label', `Saldo ${v == null ? 'indisponível' : money(v)}`);
 }
@@ -1296,6 +1370,9 @@ function openSettings(focusKey = false) {
           <button type="submit" class="btn">Salvar</button>
         </form>
         <div class="key-status" id="key-status"></div>
+        <div class="field-title"><span>Moeda dos valores</span></div>
+        <div class="seg currency-seg" id="currency-seg" role="radiogroup" aria-label="Moeda dos valores"></div>
+        <div class="key-status" id="fx-status"></div>
         <div class="field-title"><span id="mlist-title">Modelos no painel</span><button class="icon-btn" data-act="reload-models" ${tip('Atualizar catálogo do Atlas Cloud')} style="width:30px;height:30px">${svg('refresh', 's16')}</button></div>
         <div class="model-tools">
           <label class="search">${svg('search', 's16')}<input class="input" id="model-search" placeholder="Buscar" value="${esc(SET.q)}"></label>
@@ -1314,6 +1391,7 @@ function openSettings(focusKey = false) {
   document.body.appendChild(wrap);
   SET.el = wrap;
   renderKeyStatus();
+  renderCurrency();
   renderModelList();
   renderAgents();
   $('#agents').addEventListener('change', (e) => {
@@ -1330,6 +1408,39 @@ function closeSettings() {
   SET.el?.remove();
   SET.el = null;
   hideTip();
+}
+
+/* ---------- moeda ---------- */
+
+const rateFmt = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', minimumFractionDigits: 2, maximumFractionDigits: 4 });
+
+function renderCurrency() {
+  const box = $('#currency-seg');
+  if (!box) return;
+  const cur = currencyMode();
+  box.innerHTML = [['usd', 'Dólar', 'Como o Atlas Cloud cobra'], ['brl', 'Real', 'Tudo convertido para reais'], ['both', 'Os dois', 'Dólar e, entre parênteses, o valor em reais']]
+    .map(([k, label, hint]) => `<button class="${cur === k ? 'on' : ''}" role="radio" aria-checked="${cur === k}" data-act="currency" data-v="${k}" ${tip(hint)}>${label}</button>`).join('');
+  const fx = S.config.fx;
+  $('#fx-status').textContent = cur === 'usd' || !fx
+    ? 'O Atlas Cloud cobra em dólar. Em reais, os valores são convertidos pela cotação do dia.'
+    : `Cotação usada: ${rateFmt.format(fx.rate)} por dólar (${fx.source}, ${new Date(fx.at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}). É a cotação comercial: ao recarregar o saldo, o cartão ainda cobra IOF e taxas.`;
+}
+
+// Redesenha tudo o que mostra dinheiro
+function refreshMoney() {
+  renderBalance();
+  renderComposer();
+  renderTimeline();
+  if (SET.open) { renderCurrency(); renderModelList(); renderAgents(); renderKeyStatus(); }
+}
+
+async function setCurrency(value) {
+  try {
+    const r = await api('/api/config', { method: 'PUT', body: { currency: value } });
+    S.config = { ...S.config, ...r.config };
+    if (!r.ok && r.error) toast(r.error, 'error');
+  } catch (e) { toast(e.message, 'error'); }
+  refreshMoney();
 }
 
 /* ---------- agentes de IA (MCP) ---------- */
@@ -1610,7 +1721,7 @@ function toolMeta(b) {
   const running = b.items.some((i) => i.status === 'running' || i.status === 'queued');
   const done = b.items.filter((i) => i.status === 'done' && i.cost != null);
   const est = done.some((i) => i.costEstimated);
-  if (done.length || running) parts.push(`<span class="m cost" ${tip(est ? 'Custo estimado pelo preço da tabela' : 'Custo cobrado pelo Atlas Cloud')}>${running ? '<span class="mini-spin"></span>' : ''}${done.length ? `${est ? '≈ ' : ''}${cost(done.reduce((a, i) => a + i.cost, 0))}` : ''}</span>`);
+  if (done.length || running) parts.push(`<span class="m cost" ${tip(est ? COST_TIP_EST : COST_TIP)}>${running ? '<span class="mini-spin"></span>' : ''}${done.length ? `${est ? '≈ ' : ''}${costHTML(done.reduce((a, i) => a + i.cost, 0))}` : ''}</span>`);
   return parts.join('');
 }
 
@@ -1729,6 +1840,7 @@ document.addEventListener('click', async (e) => {
     case 'open-folder': try { await api('/api/open-folder', { method: 'POST', body: {} }); } catch (err) { toast(err.message, 'error'); } break;
     case 'mcp-toggle': saveAgents({ enabled: !S.config.mcp?.enabled }, true); break;
     case 'mcp-connect': connectAgents(t); break;
+    case 'currency': setCurrency(t.dataset.v); break;
     case 'quit': {
       const busy = [...S.batches.values()].some((x) => x.items.some((i) => i.status === 'running' || i.status === 'queued'));
       armConfirm(t, async () => {
@@ -1933,6 +2045,7 @@ function connectEvents() {
   es.addEventListener('batch-removed', (e) => removeBatch(JSON.parse(e.data).id));
   es.addEventListener('balance', (e) => { setBalance(JSON.parse(e.data)); if (SET.open) renderKeyStatus(); });
   es.addEventListener('catalog', () => { loadModels(); loadVModels(); loadAModels(); });
+  es.addEventListener('fx', (e) => { if (S.config.currency && S.config.currency !== 'usd') { S.config.fx = JSON.parse(e.data); refreshMoney(); } });
   es.addEventListener('quit', () => { es.close(); showStopped(); });
   es.onopen = () => { if (wasDown) { wasDown = false; syncState(); } };
   es.onerror = () => { wasDown = true; };

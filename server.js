@@ -289,6 +289,46 @@ function scheduleBalance(ms = 1200) {
 setInterval(() => { if (clients.size) refreshBalance(true); }, 90000);
 
 /* ------------------------------------------------------------------ */
+/* Cotação do dólar (para mostrar os valores em reais)                 */
+/* ------------------------------------------------------------------ */
+
+// Só é consultada quando o usuário escolhe ver valores em reais. São serviços abertos, sem cadastro;
+// o pedido não leva nenhum dado do usuário. Se o primeiro falhar, tenta o seguinte.
+const FX_FILE = path.join(CACHE, 'fx.json');
+const FX_TTL = 60 * 60e3;
+const FX_SOURCES = [
+  ['AwesomeAPI', 'https://economia.awesomeapi.com.br/json/last/USD-BRL', (j) => Number(j.USDBRL.bid)],
+  ['Frankfurter', 'https://api.frankfurter.dev/v1/latest?base=USD&symbols=BRL', (j) => Number(j.rates.BRL)],
+  ['ExchangeRate-API', 'https://open.er-api.com/v6/latest/USD', (j) => Number(j.rates.BRL)],
+];
+let fx = Object.assign({ rate: null, at: 0, source: '' }, readJSON(FX_FILE, {}));
+let fxPromise = null;
+const wantsBrl = () => config.currency === 'brl' || config.currency === 'both';
+
+async function refreshFx(force = false) {
+  if (!force && fx.rate && Date.now() - fx.at < FX_TTL) return fx;
+  fxPromise ??= (async () => {
+    for (const [source, url, read] of FX_SOURCES) {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 8000);
+      try {
+        const res = await fetch(url, { signal: ctrl.signal, headers: { Accept: 'application/json' } });
+        if (!res.ok) continue;
+        const rate = read(await res.json());
+        if (!(rate > 0.5 && rate < 100)) continue; // resposta estranha: tenta a próxima fonte
+        fx = { rate: Math.round(rate * 10000) / 10000, at: Date.now(), source };
+        writeJSON(FX_FILE, fx, 0);
+        emit('fx', fx);
+        return;
+      } catch { /* tenta a próxima fonte */ } finally { clearTimeout(t); }
+    }
+  })().finally(() => { fxPromise = null; });
+  await fxPromise;
+  return fx;
+}
+setInterval(() => { if (wantsBrl() && clients.size) refreshFx(); }, 10 * 60e3);
+
+/* ------------------------------------------------------------------ */
 /* Referências                                                         */
 /* ------------------------------------------------------------------ */
 
@@ -320,15 +360,38 @@ function refView(id) {
   return r ? { id, url: `/media/refs/${r.file}`, w: r.w, h: r.h, kind: r.kind || 'image', duration: r.duration || 0, ...(r.name ? { name: r.name } : {}) } : null;
 }
 
+const uploading = new Map(); // id -> envio em andamento (para o mesmo arquivo não subir duas vezes ao mesmo tempo)
 async function remoteRef(id) {
   const r = db.refs[id];
   if (!r) throw new Error('Imagem de referência não encontrada.');
   if (r.remote && Date.now() - r.remote.at < REMOTE_TTL) return r.remote.url;
-  const buf = await fsp.readFile(path.join(REFS, r.file));
-  const url = await atlas.upload(config.apiKey, buf, r.file, r.mime);
-  r.remote = { url, at: Date.now() };
-  saveDb();
-  return url;
+  if (!uploading.has(id)) {
+    uploading.set(id, (async () => {
+      try {
+        const buf = await fsp.readFile(path.join(REFS, r.file));
+        const url = await atlas.upload(config.apiKey, buf, r.file, r.mime);
+        r.remote = { url, at: Date.now() };
+        saveDb();
+        return url;
+      } finally { uploading.delete(id); }
+    })());
+  }
+  return uploading.get(id);
+}
+
+// Endereço no Atlas de uma entrada já enviada (null se ainda não subiu ou se o envio venceu)
+function freshUrl(ref) {
+  const x = ref && db.refs[ref.id];
+  return x && x.remote && Date.now() - x.remote.at < REMOTE_TTL ? x.remote.url : null;
+}
+
+// Para quase todos os modelos o preço não depende do arquivo de entrada, então dá para cotar com um
+// endereço de mentira. Quando o Atlas precisa do arquivo (ex.: cobra pela duração do vídeo enviado), a
+// cotação falha: aí as entradas sobem em segundo plano e a tela pergunta de novo em instantes.
+const PLACEHOLDER = 'https://example.com/entrada';
+function uploadLater(refs) {
+  if (!config.apiKey) return;
+  for (const r of refs) if (r && !freshUrl(r)) remoteRef(r.id).catch(() => {});
 }
 
 const batchRefUploads = new Map();
@@ -407,9 +470,13 @@ async function runItem(batch, item) {
     const { body, error } = mapper.buildBody(variant.id, caps, { prompt: batch.prompt, refUrls, ratio: batch.ratio, tier: batch.tier });
     if (error) throw new Error(error);
     item.variantId = variant.id;
-    item.unitPrice = variant.price;
     item.params = paramsSummary(body, caps);
     if (hasRefs && caps.maxImages && batch.refs.length > caps.maxImages) item.note = caps.maxImages === 1 ? 'Esse modelo usou só a primeira referência.' : `Esse modelo usou só as ${caps.maxImages} primeiras referências.`;
+    // o preço de tabela é o da menor qualidade: a cotação do Atlas considera resolução e qualidade
+    const quote = await quoteFor(body, variant.price);
+    item.unitPrice = quote.price;
+    item.quoteExact = quote.exact;
+    item.quoteSource = quote.source;
     const d = await limit(() => atlas.submit(config.apiKey, body));
     item.predictionId = d.id;
     emitBatch(batch);
@@ -482,15 +549,17 @@ const quoteCache = new Map(); // corpo -> { at, quote }
 const videoQuote = (variant, body, seconds) => quoteFor(body, tablePrice(variant, seconds));
 
 // Pergunta ao Atlas quanto custaria (não gera nem cobra). Se não der, vale a estimativa da tabela.
+// source diz de onde veio o valor: 'atlas' (cotação do pedido inteiro) ou 'table' (preço de tabela, que
+// ignora resolução e qualidade e por isso costuma ficar abaixo do cobrado)
 async function quoteFor(body, tableValue) {
-  const table = { price: tableValue, exact: false };
+  const table = { price: tableValue, exact: false, source: 'table' };
   if (!config.apiKey) return table;
   const key = JSON.stringify(body);
   const hit = quoteCache.get(key);
   if (hit && Date.now() - hit.at < 5 * 60e3) return hit.quote;
   try {
     const q = await atlas.calculate(config.apiKey, body);
-    const quote = { price: q.price, exact: !q.estimated };
+    const quote = { price: q.price, exact: !q.estimated, source: 'atlas' };
     quoteCache.set(key, { at: Date.now(), quote });
     if (quoteCache.size > 300) quoteCache.delete(quoteCache.keys().next().value);
     return quote;
@@ -565,20 +634,14 @@ async function finishVideo(batch, item, d) {
     if (!src) return fail(batch, item, 'Não consegui baixar o vídeo gerado.');
     outputs.push({ url: src, w: 0, h: 0, duration: 0, remote: src });
   }
-  const price = Number(String(d.price ?? '').replace(/[^0-9.eE-]/g, ''));
-  const expected = item.unitPrice;
-  const plausible = expected == null || (price >= expected / 25 && price <= expected * 25);
-  if (Number.isFinite(price) && price > 0 && String(d.price).trim() !== '' && plausible) {
-    item.cost = price; item.costEstimated = false;
-  } else {
-    item.cost = expected ?? null;
-    item.costEstimated = !item.quoteExact;
-  }
+  const settled = applyCost(item, d, item.unitPrice);
+  if (!settled && item.quoteExact) item.costEstimated = false; // a cotação exata do Atlas já é o valor cobrado
   item.outputs = outputs;
   item.status = 'done';
   item.finishedAt = Date.now();
   emitBatch(batch);
   scheduleBalance();
+  if (!settled) settleCost(batch, item);
 }
 
 // Marca as gerações pedidas por um agente (MCP), para a tela mostrar e para somar o gasto do dia
@@ -646,23 +709,33 @@ function audioMissing(r) {
 }
 
 // O que o mapeador precisa para montar o pedido de um modelo
-const audioInput = (r, key, audioUrl) => ({ text: r.prompt, lyrics: r.lyrics, voice: (r.voices || {})[key], speed: r.speed, lang: r.lang, instrumental: r.instrumental, duration: r.duration, loop: r.loop, audioUrl });
+const audioInput = (r, key, audioUrl, voiceRefUrl) => ({ text: r.prompt, lyrics: r.lyrics, voice: (r.voices || {})[key], voiceRefUrl, speed: r.speed, lang: r.lang, instrumental: r.instrumental, duration: r.duration, loop: r.loop, audioUrl });
+
+// Voz clonada de um áudio: no pedido ela vem como "ref:<id do arquivo enviado>"
+function voiceRefOf(r, key) {
+  const v = (r.voices || {})[key];
+  const ref = typeof v === 'string' && v.startsWith('ref:') ? refView(v.slice(4)) : null;
+  return ref && ref.kind !== 'image' ? ref : null;
+}
 
 // Quanto cada modelo cobraria por este pedido. Não gera nem cobra nada.
 async function estimateAudio(r) {
   await ensureCatalog();
-  const fresh = r.input && db.refs[r.input.id]?.remote && Date.now() - db.refs[r.input.id].remote.at < REMOTE_TTL ? db.refs[r.input.id].remote.url : null;
-  return Promise.all(r.keys.map(async (key) => {
+  const fresh = freshUrl(r.input);
+  const voiceRefs = r.keys.map((key) => voiceRefOf(r, key)).filter(Boolean);
+  const items = await Promise.all(r.keys.map(async (key) => {
     const fam = afamilyByKey(key);
     if (!fam || fam.kind !== r.mode) return { key, price: null, exact: false, error: 'Esse modelo não faz isso.' };
     const variant = fam.variants.main;
     const caps = await capsFor(variant);
-    const built = amapper.buildBody(variant.id, caps, audioInput(r, key, fresh || 'https://example.com/a.mp3'));
+    const vref = voiceRefOf(r, key);
+    const built = amapper.buildBody(variant.id, caps, audioInput(r, key, fresh || `${PLACEHOLDER}.mp3`, vref ? freshUrl(vref) || `${PLACEHOLDER}.mp3` : null));
     if (built.error) return { key, price: null, exact: false, error: built.error };
     const table = amapper.tablePrice(variant, { text: r.prompt, seconds: built.used.duration || r.duration });
-    const quote = r.mode !== 'stt' || fresh ? await quoteFor(built.body, table) : { price: table, exact: false };
-    return { key, price: quote.price, exact: quote.exact, used: built.used };
+    const quote = await quoteFor(built.body, table);
+    return { key, price: quote.price, exact: quote.exact, source: quote.source, used: built.used };
   }));
+  return withPending(items, [r.input, ...voiceRefs].filter(Boolean));
 }
 
 async function runAudioItem(batch, item) {
@@ -677,13 +750,16 @@ async function runAudioItem(batch, item) {
     const variant = fam.variants.main;
     const caps = await capsFor(variant);
     const audioUrl = batch.input ? await remoteRef(batch.input.id) : null;
-    const inp = audioInput(batch, item.family, audioUrl);
+    const vref = voiceRefOf(batch, item.family);
+    const inp = audioInput(batch, item.family, audioUrl, vref ? await remoteRef(vref.id) : null);
     const { body, error, used } = amapper.buildBody(variant.id, caps, inp);
     if (error) throw new Error(error);
+    if (vref && !used.voiceRef) throw new Error('Esse modelo não usa um áudio como voz de referência.');
     item.variantId = variant.id;
     item.params = {};
     for (const [k, v] of Object.entries(body)) if (k !== 'model' && typeof v !== 'object' && !(typeof v === 'string' && v.length > 80)) item.params[k] = v;
     const notes = [];
+    if (used.voiceRef) item.params.voz = 'clonada de um áudio';
     if (used.cut) notes.push(`O texto passou do limite desse modelo e foi cortado em ${used.cut} caracteres.`);
     if (used.instrumental) notes.push('Sem letra, esse modelo gera só o instrumental.');
     if (notes.length) item.note = notes.join(' ');
@@ -721,21 +797,15 @@ async function finishAudio(batch, item, d) {
     }
   }
   if (!outputs.length && !text) return fail(batch, item, batch.mode === 'stt' ? 'O modelo terminou mas não devolveu o texto.' : 'O modelo terminou mas não devolveu áudio.');
-  const price = Number(String(d.price ?? '').replace(/[^0-9.eE-]/g, ''));
-  const expected = item.unitPrice;
-  const plausible = expected == null || (price >= expected / 50 && price <= expected * 50);
-  if (Number.isFinite(price) && price > 0 && String(d.price).trim() !== '' && plausible) {
-    item.cost = price; item.costEstimated = false;
-  } else {
-    item.cost = expected ?? null;
-    item.costEstimated = !item.quoteExact;
-  }
+  const settled = applyCost(item, d, item.unitPrice);
+  if (!settled && item.quoteExact) item.costEstimated = false;
   item.outputs = outputs;
   if (text) item.text = text;
   item.status = 'done';
   item.finishedAt = Date.now();
   emitBatch(batch);
   scheduleBalance();
+  if (!settled) settleCost(batch, item);
 }
 
 function newAudioBatch(r, via) {
@@ -895,22 +965,82 @@ async function finish(batch, item, d) {
     }
   }
   if (!outputs.length) return fail(batch, item, 'Não consegui baixar a imagem gerada.');
-  const price = Number(String(d.price ?? '').replace(/[^0-9.eE-]/g, ''));
-  const expected = item.unitPrice != null ? item.unitPrice * outputs.length : null;
-  // só confia no preço devolvido se ele for coerente com a tabela (evita unidades diferentes)
-  const plausible = expected == null || (price >= expected / 25 && price <= expected * 25);
-  if (Number.isFinite(price) && price > 0 && String(d.price).trim() !== '' && plausible) {
-    item.cost = price; item.costEstimated = false;
-  } else {
-    item.cost = item.unitPrice != null ? item.unitPrice * outputs.length : null;
-    item.costEstimated = true;
-  }
+  // a cotação do Atlas vale para o pedido inteiro; o preço de tabela é por imagem
+  const settled = applyCost(item, d, item.unitPrice == null ? null : item.quoteSource === 'atlas' ? item.unitPrice : item.unitPrice * outputs.length);
+  if (!settled && item.quoteExact) item.costEstimated = false; // a cotação exata do Atlas já é o valor cobrado
   if (Array.isArray(d.has_nsfw_contents) && d.has_nsfw_contents.some(Boolean)) item.note = 'O modelo marcou conteúdo sensível.';
   item.outputs = outputs;
   item.status = 'done';
   item.finishedAt = Date.now();
   emitBatch(batch);
   scheduleBalance();
+  if (!settled) settleCost(batch, item);
+}
+
+/* ---------- custo cobrado ---------- */
+
+// Preço que o Atlas informa numa geração (null enquanto ele ainda não fechou a conta)
+function chargedPrice(d) {
+  const raw = String(d && d.price != null ? d.price : '').trim();
+  const n = Number(raw.replace(/[^0-9.eE-]/g, ''));
+  return raw !== '' && Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// Registra o custo de um item. Devolve true quando o valor já é o cobrado pelo Atlas; false quando ficou
+// a previsão (o Atlas costuma informar o preço alguns segundos depois de entregar o resultado).
+function applyCost(item, d, expected) {
+  const price = chargedPrice(d);
+  // só confia no preço devolvido se ele for coerente com a previsão (evita unidades diferentes)
+  if (price != null && (expected == null || (price >= expected / 50 && price <= expected * 50))) {
+    item.cost = price;
+    item.costEstimated = false;
+    return true;
+  }
+  item.cost = expected ?? null;
+  item.costEstimated = true;
+  return false;
+}
+
+// Volta a consultar a geração até o Atlas informar o preço cobrado, e corrige o custo registrado
+async function settleCost(batch, item, waits = [2500, 6000, 15000, 45000, 120000]) {
+  for (const ms of waits) {
+    await sleep(ms);
+    if (!db.batches.includes(batch) || !batch.items.includes(item) || item.status !== 'done' || !item.predictionId || !config.apiKey) return false;
+    try {
+      const price = chargedPrice(await atlas.prediction(config.apiKey, item.predictionId));
+      if (price != null) {
+        item.cost = price;
+        item.costEstimated = false;
+        emitBatch(batch);
+        return true;
+      }
+    } catch (e) {
+      if (e.status === 404) return false; // o Atlas não guarda mais essa geração
+    }
+  }
+  return false;
+}
+
+// Gerações antigas cujo custo ficou só na previsão: confere de novo com o Atlas, uma vez por dia no máximo
+async function repairCosts() {
+  if (!config.apiKey) return;
+  const now = Date.now();
+  const todo = [];
+  for (const b of db.batches) {
+    for (const it of b.items) {
+      if (it.status !== 'done' || !it.costEstimated || !it.predictionId || it.edited) continue;
+      if (now - (it.finishedAt || b.createdAt) > 14 * 86400e3 || now - (it.costCheckedAt || 0) < 86400e3) continue;
+      todo.push([b, it]);
+    }
+  }
+  let fixed = 0;
+  for (let i = 0; i < todo.length; i += 4) {
+    await Promise.all(todo.slice(i, i + 4).map(async ([b, it]) => {
+      it.costCheckedAt = now;
+      if (await settleCost(b, it, [0])) fixed++;
+    }));
+  }
+  if (todo.length) { saveDb(); console.log(`Custos conferidos com o Atlas: ${todo.length} gerações, ${fixed} corrigidas.`); }
 }
 
 function newBatch({ prompt, refs, familyKeys, ratio, tier, count, via }) {
@@ -1046,6 +1176,9 @@ function stateView() {
     config: {
       hasKey: !!config.apiKey, keyHint: maskKey(config.apiKey), enabled: config.enabled || [], enabledVideo: config.enabledVideo || [], enabledAudio: config.enabledAudio || [], dataDir: DATA, background: BACKGROUND, ffmpeg: ffmpegOk,
       mcp: { ...config.mcp, script: path.join(ROOT, 'mcp.js') },
+      // moeda em que a tela mostra os valores: 'usd' (padrão), 'brl' ou 'both'
+      currency: wantsBrl() ? config.currency : 'usd',
+      fx: wantsBrl() && fx.rate ? fx : null,
     },
     batches: db.batches,
     balance: balanceState,
@@ -1151,7 +1284,8 @@ route('POST', '/api/audio/generate', async (req, res) => {
 });
 
 route('POST', '/api/audio/estimate', async (req, res) => {
-  send(res, 200, { items: await estimateAudio(audioRequest(await readJsonBody(req))) });
+  const items = await estimateAudio(audioRequest(await readJsonBody(req)));
+  send(res, 200, { items, pending: !!items.pending });
 });
 
 route('POST', '/api/models/refresh', async (req, res) => {
@@ -1190,8 +1324,16 @@ route('PUT', '/api/config', async (req, res) => {
     await Promise.race([Promise.allSettled(newly.map(familyCaps)), sleep(8000)]);
     out.audioFamilies = newly.map(afamilyView);
   }
+  if (typeof body.currency === 'string') {
+    const want = ['brl', 'both'].includes(body.currency) ? body.currency : 'usd';
+    if (want !== 'usd') {
+      await refreshFx();
+      if (!fx.rate) { out.ok = false; out.error = 'Não consegui consultar a cotação do dólar agora. Tente de novo em instantes.'; }
+    }
+    if (out.ok) config.currency = want;
+  }
   if (body.mcp && typeof body.mcp === 'object') {
-    const amount = (v, old) => { const n = Number(v); return v === undefined ? old : Number.isFinite(n) && n > 0 ? Math.min(100000, Math.round(n * 100) / 100) : 0; };
+    const amount =(v, old) => { const n = Number(v); return v === undefined ? old : Number.isFinite(n) && n > 0 ? Math.min(100000, Math.round(n * 100) / 100) : 0; };
     if (typeof body.mcp.enabled === 'boolean') config.mcp.enabled = body.mcp.enabled;
     config.mcp.maxPerCall = amount(body.mcp.maxPerCall, config.mcp.maxPerCall);
     config.mcp.maxPerDay = amount(body.mcp.maxPerDay, config.mcp.maxPerDay);
@@ -1268,39 +1410,77 @@ route('POST', '/api/video/generate', async (req, res) => {
 
 // Quanto cada modelo escolhido custaria com os ajustes atuais. Não gera nem cobra nada.
 // r: { mode, inputs, keys, ratio, res, duration, audio }
+// A lista devolvida traz também .pending = true quando alguma cotação ainda depende de um arquivo subir
+// para o Atlas (o envio já começou em segundo plano; basta perguntar de novo em instantes).
 async function estimateVideo(r) {
   await ensureCatalog();
   const need = needOf(r.inputs);
-  // só usa as URLs que já estão no Atlas: estimar não deve subir arquivo nenhum
-  const fresh = (ref) => { const x = ref && db.refs[ref.id]; return x?.remote && Date.now() - x.remote.at < REMOTE_TTL ? x.remote.url : null; };
-  const urls = { start: fresh(r.inputs.start), end: fresh(r.inputs.end), refs: r.inputs.refs.map(fresh), videos: r.inputs.videos.map(fresh), video: fresh(r.inputs.video) };
-  const ready = (!r.inputs.start || urls.start) && (!r.inputs.end || urls.end) && urls.refs.every(Boolean) && urls.videos.every(Boolean) && (!r.inputs.video || urls.video) && !missingInput(r.mode, r.inputs);
-  return Promise.all(r.keys.map(async (key) => {
+  const inputs = [r.inputs.start, r.inputs.end, ...r.inputs.refs, ...r.inputs.videos, r.inputs.video].filter(Boolean);
+  const urls = { start: freshUrl(r.inputs.start), end: freshUrl(r.inputs.end), refs: r.inputs.refs.map(freshUrl), videos: r.inputs.videos.map(freshUrl), video: freshUrl(r.inputs.video) };
+  const items = await Promise.all(r.keys.map(async (key) => {
     const fam = vfamilyByKey(key);
     if (!fam) return { key, price: null, exact: false };
     await familyCaps(fam);
     const variant = vmapper.pickVariant(fam, capsById, r.mode, need);
     if (!variant) return { key, price: null, exact: false, error: vmapper.whyNot(r.mode, need) };
     const caps = capsById[variant.id];
-    const placeholder = 'https://example.com/x';
-    const fill = (list) => list.map((u) => u || placeholder);
+    const fill = (list) => list.map((u) => u || PLACEHOLDER);
     // modo referência ainda vazio: conta com uma imagem, só para ter uma ideia do preço
     const empty = r.mode === 'ref' && !need.images && !need.videos;
     // o preço não depende do texto: um prompt fixo evita recalcular a cada tecla
     const built = vmapper.buildBody(variant.id, caps, r.mode, {
       prompt: 'video', ratio: r.ratio, res: r.res, duration: r.duration, audio: r.audio,
-      start: urls.start || placeholder, end: r.inputs.end ? urls.end || placeholder : null,
-      refs: empty ? [placeholder] : fill(urls.refs), videos: fill(urls.videos), video: urls.video || placeholder,
+      start: urls.start || PLACEHOLDER, end: r.inputs.end ? urls.end || PLACEHOLDER : null,
+      refs: empty ? [PLACEHOLDER] : fill(urls.refs), videos: fill(urls.videos), video: urls.video || PLACEHOLDER,
     });
-    if (built.error) return { key, price: tablePrice(variant, billSeconds(r.mode, r.inputs, null, r.duration)), exact: false };
+    if (built.error) return { key, price: tablePrice(variant, billSeconds(r.mode, r.inputs, null, r.duration)), exact: false, source: 'table' };
     const seconds = billSeconds(r.mode, r.inputs, built.used, r.duration);
-    const quote = ready ? await videoQuote(variant, built.body, seconds) : { price: tablePrice(variant, seconds), exact: false };
-    return { key, price: quote.price, exact: quote.exact, used: built.used };
+    const quote = await videoQuote(variant, built.body, seconds);
+    return { key, price: quote.price, exact: quote.exact, source: quote.source, used: built.used };
   }));
+  return withPending(items, inputs);
+}
+
+// Sem cotação do Atlas e com entradas que ainda não subiram: sobe agora e marca para perguntar de novo
+function withPending(items, inputs) {
+  const waiting = inputs.filter((ref) => !freshUrl(ref));
+  items.pending = !!config.apiKey && waiting.length > 0 && items.some((x) => x.source === 'table' && !x.error);
+  if (items.pending) uploadLater(waiting);
+  return items;
 }
 
 route('POST', '/api/video/estimate', async (req, res) => {
-  send(res, 200, { items: await estimateVideo(videoRequest(await readJsonBody(req))) });
+  const items = await estimateVideo(videoRequest(await readJsonBody(req)));
+  send(res, 200, { items, pending: !!items.pending });
+});
+
+// Imagens: quanto cada modelo cobraria. O preço de tabela vale para a menor qualidade; a cotação do Atlas
+// considera proporção e qualidade, e nos modelos cobrados por token é uma estimativa.
+async function estimateImage(b) {
+  await ensureCatalog();
+  const refs = cleanRefs(b.refs);
+  const keys = (Array.isArray(b.families) ? b.families : []).filter((k) => typeof k === 'string');
+  const n = keys.length === 1 ? Math.max(1, Math.min(8, Number(b.count) || 1)) : 1;
+  const tier = Math.max(0, Math.min(2, Number(b.tier) || 0));
+  const items = await Promise.all(keys.map(async (key) => {
+    const fam = familyByKey(key);
+    if (!fam) return { key, price: null, exact: false };
+    await familyCaps(fam);
+    const variant = mapper.pickVariant(fam, capsById, refs.length > 0);
+    if (!variant) return { key, price: null, exact: false, error: refs.length ? 'Esse modelo não aceita imagens de referência.' : 'Esse modelo precisa de uma imagem de referência.' };
+    const caps = capsById[variant.id] || mapper.analyzeSchema(null);
+    const built = mapper.buildBody(variant.id, caps, { prompt: 'image', refUrls: refs.map((r) => freshUrl(r) || PLACEHOLDER), ratio: b.ratio || 'auto', tier });
+    const table = variant.price != null ? variant.price * n : null;
+    if (built.error) return { key, price: table, exact: false, source: 'table' };
+    const quote = await quoteFor(built.body, variant.price);
+    return { key, price: quote.price != null ? quote.price * n : null, exact: quote.exact, source: quote.source };
+  }));
+  return withPending(items, refs);
+}
+
+route('POST', '/api/estimate', async (req, res) => {
+  const items = await estimateImage(await readJsonBody(req));
+  send(res, 200, { items, pending: !!items.pending });
 });
 
 route('POST', '/api/batches/([\\w-]+)/redo', async (req, res, url, m) => {
@@ -1512,7 +1692,7 @@ const agent = agentTools.create({
   whyNotVideo: vmapper.whyNot,
   publicVideoCaps: vmapper.publicCaps,
   saveRef, refFromOutput, ownMedia, download, localOutputPath, findItem,
-  videoInputs, needOf, uploadInputs, estimateVideo,
+  videoInputs, needOf, uploadInputs, estimateVideo, estimateImage,
   newBatch, newVideoBatch,
   batches: () => db.batches,
   balance: () => refreshBalance(true),
@@ -1623,6 +1803,9 @@ async function start() {
   listen();
   refreshCatalog(false);
   if (config.apiKey) refreshBalance(true);
+  if (wantsBrl()) refreshFx();
+  // confere com o Atlas os custos que ficaram só na previsão (sem pressa: não atrasa a abertura)
+  setTimeout(() => repairCosts().catch((e) => console.error('Falha ao conferir custos:', e.message)), 4000);
 }
 
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { flushAll(); process.exit(0); });

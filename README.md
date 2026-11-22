@@ -54,11 +54,12 @@ No topo do painel há três abas. As três funcionam do mesmo jeito: escolha os 
 
 | Modo | O que faz |
 |---|---|
-| **Fala** | lê um texto com a voz que você escolher. Dá para ouvir uma amostra de cada voz, mudar a velocidade e indicar o idioma |
+| **Fala** | lê um texto com a voz que você escolher. O painel de vozes tem busca, filtros e amostra de cada voz; dá para mudar a velocidade e indicar o idioma |
 | **Música** | cria uma música a partir de uma descrição. A letra é opcional, e há a opção só instrumental |
 | **Efeitos** | cria um efeito sonoro ou um som ambiente, com duração e opção de loop |
 | **Transcrever** | passa um áudio (ou o áudio de um vídeo) para texto |
 
+- **Voz clonada**: há dois caminhos, os dois no painel de vozes. Nos modelos **ElevenLabs v4**, cole o ID de uma voz do ElevenLabs, inclusive uma que você clonou no site deles (o Atlas Cloud não cria o clone, só usa o ID). No **Seed Audio 1.0**, envie de 5 a 30 segundos de uma voz e o modelo fala o seu texto imitando a amostra.
 - **Vídeo falante**: em qualquer áudio gerado, o botão de filme pede uma foto (ou um vídeo) e cria um vídeo em que a pessoa fala aquele áudio. O resultado aparece na aba Vídeos.
 
 ### Na linha do tempo
@@ -73,7 +74,9 @@ No topo do painel há três abas. As três funcionam do mesmo jeito: escolha os 
 | Apagar | lixeira, e confirmar no segundo clique |
 
 - **Modelos**: a lista vem ao vivo do Atlas Cloud. Em **Configurações** você liga os que quer ver em cada aba.
-- **Custo**: o botão Gerar mostra uma estimativa. Depois de gerar, aparece o valor cobrado; quando o Atlas não informa, fica a estimativa com `≈`.
+- **Custo antes de gerar**: o valor no botão Gerar vem de uma consulta ao Atlas Cloud para aquele pedido exato (modelo, qualidade, resolução, duração). A consulta não gera nem cobra nada. Com `≈` na frente, é uma estimativa: acontece nos modelos cobrados por uso (o Atlas só sabe o valor final depois) ou quando a consulta falha e vale a tabela de preços.
+- **Custo depois de gerar**: cada resultado mostra o valor que o Atlas cobrou. Ele costuma informar esse valor alguns segundos depois de entregar o resultado; até lá aparece a previsão com `≈`, que é corrigida sozinha.
+- **Em reais**: em **Configurações → Moeda dos valores** dá para ver tudo em dólar (o padrão), em reais ou nos dois. A conversão usa a cotação comercial do dia, consultada em serviços abertos; ao recarregar o saldo, o cartão ainda cobra IOF e taxas.
 
 ## Conectar ao Claude e ao ChatGPT (MCP)
 
@@ -105,7 +108,7 @@ Sem abrir o Gerador, dá no mesmo: dois cliques em **`Conectar agentes.bat`** (W
 | `listar_modelos` | lista os modelos ligados, com preço, vozes e o que cada um aceita |
 | `gerar_imagem` | gera imagens, com ou sem imagens de referência |
 | `gerar_video` | gera, edita ou estende vídeos, nos cinco modos da aba Vídeos |
-| `gerar_audio` | fala, música, efeito sonoro ou transcrição |
+| `gerar_audio` | fala (com voz da lista, voz pelo ID ou clonada de um áudio), música, efeito sonoro ou transcrição |
 | `consultar_geracao` | acompanha uma geração e devolve o caminho dos arquivos e o custo |
 | `listar_geracoes` | lista as gerações recentes, para reaproveitar um resultado |
 | `ver_saldo` | mostra o saldo e quanto os assistentes já gastaram hoje |

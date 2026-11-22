@@ -346,46 +346,14 @@ function vRequestBody(fams = vRunnable()) {
 
 /* ---------- custo ---------- */
 
-// Antes de gerar, o servidor pergunta ao Atlas quanto cada modelo cobraria (sem gerar nada).
-// Enquanto a resposta não chega, o botão mostra a conta pela tabela: preço por segundo × duração.
-const VEST = { sig: '', timer: null, seq: 0, reason: '' };
-
+// Antes de gerar, o servidor pergunta ao Atlas quanto cada modelo cobraria (sem gerar nada): veja
+// askEstimate em app.js. A conta pela tabela (preço por segundo × duração) só entra se a cotação falhar,
+// porque ela ignora a resolução e costuma ficar bem abaixo do cobrado.
 function vTableTotal(fams) {
   const secs = S.v.mode === 'edit' ? (S.v.video?.duration || 5) : S.v.dur;
   let total = 0;
   for (const f of fams) { const p = vPick(f)?.price; if (p != null) total += p * secs; }
   return total;
-}
-
-function paintVEst() {
-  const fams = vRunnable();
-  const q = S.vquote;
-  let total = 0; let exact = true;
-  if (q && fams.length && fams.every((f) => q.some((x) => x.key === f.key && x.price != null))) {
-    for (const f of fams) { const x = q.find((y) => y.key === f.key); total += x.price; if (!x.exact) exact = false; }
-  } else { total = vTableTotal(fams); exact = false; }
-  $('#go-est').textContent = fams.length && total > 0 ? `${exact ? '' : '≈ '}${cost(total)}` : '';
-  $('#go').dataset.tip = VEST.reason || `Gerar (${MOD} + Enter)${total > 0 ? `, custo ${exact ? 'calculado pelo Atlas Cloud' : 'estimado'}: ${cost(total)}` : ''}`;
-}
-
-function vEstimate() {
-  const fams = vRunnable();
-  const body = vRequestBody(fams);
-  const sig = JSON.stringify([S.config.hasKey, body.mode, body.inputs, body.families, body.ratio, body.res, body.duration, body.audio]);
-  if (sig === VEST.sig) return;
-  VEST.sig = sig;
-  clearTimeout(VEST.timer);
-  S.vquote = null;
-  if (!fams.length) return;
-  VEST.timer = setTimeout(async () => {
-    const seq = ++VEST.seq;
-    try {
-      const r = await api('/api/video/estimate', { method: 'POST', body });
-      if (seq !== VEST.seq) return;
-      S.vquote = r.items || null;
-    } catch { S.vquote = null; }
-    if (S.tab === 'video') paintVEst();
-  }, 450);
 }
 
 function renderVGo() {
@@ -399,9 +367,10 @@ function renderVGo() {
   else if (!S.v.families.length) reason = 'Escolha um modelo';
   else if (!fams.length) reason = `Os modelos escolhidos não servem para este modo (${vMode().label.toLowerCase()})`;
   btn.disabled = !!reason && S.config.hasKey;
-  VEST.reason = reason;
-  vEstimate();
-  paintVEst();
+  // o texto do prompt não muda o preço: fica de fora para não pedir cotação a cada tecla
+  const body = fams.length ? { ...vRequestBody(fams), prompt: '' } : null;
+  askEstimate('/api/video/estimate', body);
+  paintEstimate(fams.map((f) => f.key), vTableTotal(fams), reason);
 }
 
 function renderVideoPanel() {
@@ -564,7 +533,7 @@ function vBatchMeta(b) {
   const done = b.items.filter((x) => x.status === 'done' && x.cost != null);
   const total = done.reduce((a, x) => a + x.cost, 0);
   const est = done.some((x) => x.costEstimated);
-  if (done.length || running) parts.push(`<span class="m cost" ${tip(est ? 'Custo estimado pelo preço da tabela' : 'Custo cobrado pelo Atlas Cloud')}>${running ? '<span class="mini-spin"></span>' : ''}${done.length ? `${est ? '≈ ' : ''}${cost(total)}` : ''}</span>`);
+  if (done.length || running) parts.push(`<span class="m cost" ${tip(est ? COST_TIP_EST : COST_TIP)}>${running ? '<span class="mini-spin"></span>' : ''}${done.length ? `${est ? '≈ ' : ''}${costHTML(total)}` : ''}</span>`);
   return parts.join('');
 }
 
@@ -572,7 +541,7 @@ function vTileHTML(b, it, out, idx, badge, per) {
   return `<div class="tile done video" style="aspect-ratio:${tileRatio(b, it, out)}" data-act="open" data-item="${it.id}" data-idx="${idx}" draggable="true" tabindex="0">
     <video src="${esc(out.url)}#t=0.1" muted loop playsinline preload="metadata" draggable="false"></video>
     ${badge}
-    ${per != null ? `<span class="tcost num">${it.costEstimated ? '≈ ' : ''}${cost(per)}</span>` : ''}
+    ${per != null ? `<span class="tcost num">${it.costEstimated ? '≈ ' : ''}${costHTML(per)}</span>` : ''}
     <span class="tdur num">${svg('play', 's14')}${out.duration ? clock(out.duration) : ''}</span>
     <div class="tools">
       <button data-act="v-use" data-as="edit" data-item="${it.id}" data-idx="${idx}" ${tip('Editar este vídeo')}>${svg('wand')}</button>
