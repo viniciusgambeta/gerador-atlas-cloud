@@ -60,6 +60,7 @@ const ICONS = {
   repeat: '<path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/>',
   plus: '<path d="M5 12h14M12 5v14"/>',
   maximize: '<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>',
+  bookmark: '<path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/>',
   eraser: '<path d="m7 21-4.3-4.3a1 1 0 0 1 0-1.4l9.6-9.6a2 2 0 0 1 2.8 0l5.6 5.6a2 2 0 0 1 0 2.8L13 21"/><path d="M22 21H7M5 11l9 9"/>',
 };
 
@@ -131,14 +132,14 @@ function askEstimate(url, body, wait = 450) {
 function paintEstimate(keys, tableTotal, reason, verb = 'Gerar') {
   const q = EST.quote;
   const quoted = !!q && keys.length > 0 && keys.every((k) => q.some((x) => x.key === k && x.price != null));
-  let total = tableTotal; let exact = false;
-  if (quoted) { total = 0; exact = true; for (const k of keys) { const x = q.find((y) => y.key === k); total += x.price; if (!x.exact) exact = false; } }
+  let total = tableTotal; let exact = false; let cap = false; // cap: é o teto, com a duração por conta do modelo
+  if (quoted) { total = 0; exact = true; for (const k of keys) { const x = q.find((y) => y.key === k); total += x.price; if (!x.exact) exact = false; if (x.max) cap = true; } }
   const el = $('#go-est');
   const waiting = EST.loading && !quoted;
   if (!keys.length || !(total > 0)) el.textContent = '';
   else if (waiting) el.innerHTML = '<span class="mini-spin"></span>';
-  else el.innerHTML = `${exact ? '' : '≈ '}${costHTML(total)}`;
-  const how = waiting ? ', calculando o custo…' : total > 0 ? `, custo ${exact ? 'calculado pelo Atlas Cloud' : quoted ? 'estimado pelo Atlas Cloud' : 'estimado pela tabela (o cobrado pode ser maior)'}: ${cost(total)}` : '';
+  else el.innerHTML = `${cap ? 'até ' : exact ? '' : '≈ '}${costHTML(total)}`;
+  const how = waiting ? ', calculando o custo…' : total > 0 ? `, custo ${exact ? 'calculado pelo Atlas Cloud' : cap ? 'máximo (com a duração automática, o Atlas Cloud cota a mais longa que o modelo pode gerar)' : quoted ? 'estimado pelo Atlas Cloud' : 'estimado pela tabela (o cobrado pode ser maior)'}: ${cost(total)}` : '';
   $('#go').dataset.tip = reason || `${verb} (${MOD} + Enter)${how}`;
 }
 
@@ -205,6 +206,7 @@ const S = {
   v: { prompt: '', mode: 'text', start: null, end: null, refs: [], editRefs: [], video: null, families: [], ratio: 'auto', res: '720p', dur: 5, audio: true },
   vquote: null,
   batches: new Map(),
+  library: [], // biblioteca de referências: imagens que o usuário guardou para usar sempre
   q: '', // busca do histórico
   balance: { value: null },
   balanceLoading: false,
@@ -370,9 +372,182 @@ function renderRefs() {
     <div class="ref ${r.uploading ? 'uploading' : ''}" draggable="true" data-ref-index="${i}">
       <img src="${esc(r.url)}" alt="">
       <span class="idx num">${i + 1}</span>
+      ${libSaveBtn(r)}
       <button class="rm" data-act="rm-ref" data-i="${i}" ${tip('Remover')}>${svg('x', 's14')}</button>
     </div>`).join('') +
-    `<button class="ref-add" data-act="add-ref" ${tip('Imagens de referência: clique, arraste ou cole')}>${svg('imagePlus', 's20')}</button>`;
+    `<button class="ref-add" data-act="add-ref" ${tip('Imagens de referência: clique, arraste ou cole')}>${svg('imagePlus', 's20')}${S.c.refs.length ? '' : '<span>Adicionar referência</span>'}</button>${libOpenBtn('refs')}`;
+}
+
+/* ---------- biblioteca de referências ---------- */
+
+// Imagens que o usuário escolheu guardar para usar sempre. Nada entra sozinho: ou ele marca uma referência
+// do painel (o marcador sobre a miniatura), ou envia imagens pela seção Biblioteca das Configurações.
+const inLibrary = (id) => S.library.some((e) => e.id === id);
+
+// Marcador sobre a miniatura de uma referência: guarda (ou tira) da biblioteca
+function libSaveBtn(ref) {
+  if (!ref || ref.uploading || (ref.kind && ref.kind !== 'image')) return '';
+  const on = inLibrary(ref.id);
+  return `<button class="lib ${on ? 'on' : ''}" data-act="lib-toggle" data-id="${esc(ref.id)}" ${tip(on ? 'Está na biblioteca (clique para tirar)' : 'Salvar na biblioteca')}>${svg('bookmark', 's14')}</button>`;
+}
+// Botão que abre a biblioteca para escolher imagens. slot diz para onde elas vão (nos vídeos há mais de um lugar)
+function libOpenBtn(slot, cls = 'ref-add lib-open') {
+  return `<button class="${cls}" data-act="lib-open" data-slot="${slot}" ${tip('Escolher da biblioteca')}>${svg('bookmark', 's20')}</button>`;
+}
+
+function setLibrary(list) {
+  S.library = Array.isArray(list) ? list : [];
+  if (S.tab === 'image') renderRefs(); else if (S.tab === 'video') renderVMedia();
+  if (popEl && popEl.classList.contains('lib-pop')) renderLibraryPop();
+  if (SET.open) renderLibrarySettings();
+  if (LIBVIEW.el) renderLibraryView();
+}
+
+async function libraryAdd(id, name = '') {
+  try { setLibrary((await api('/api/library', { method: 'POST', body: { id, name } })).library); return true; } catch (e) { toast(e.message, 'error'); return false; }
+}
+async function libraryRemove(id) {
+  try { setLibrary((await api(`/api/library/${id}`, { method: 'DELETE' })).library); } catch (e) { toast(e.message, 'error'); }
+}
+
+// Envia arquivos direto para a biblioteca (pelas Configurações)
+async function libraryUpload(files) {
+  const imgs = [...files].filter((f) => f.type.startsWith('image/'));
+  if (!imgs.length) { toast('A biblioteca guarda imagens', 'error'); return; }
+  let ok = 0;
+  for (const file of imgs) {
+    try {
+      const ref = await api('/api/refs', { method: 'POST', raw: file, headers: { 'Content-Type': file.type, 'X-Filename': encodeURIComponent(file.name || 'imagem.png') } });
+      if (await libraryAdd(ref.id, String(file.name || '').replace(/\.[^.]+$/, ''))) ok++;
+    } catch (e) { toast(e.message, 'error'); }
+  }
+  if (ok) toast(ok > 1 ? `${ok} imagens guardadas na biblioteca` : 'Imagem guardada na biblioteca', 'ok');
+}
+
+// Painel flutuante com as imagens da biblioteca. Um clique põe a imagem no painel; outro tira.
+const LIB = { slot: 'refs', btn: null };
+function libraryInUse() {
+  if (S.tab === 'video') return vLibraryInUse(LIB.slot);
+  return new Set(S.c.refs.map((r) => r.id));
+}
+function renderLibraryPop() {
+  if (!popEl) return;
+  const used = libraryInUse();
+  // grade em colunas (masonry): cada imagem aparece inteira, na proporção dela
+  popEl.innerHTML = `<div class="pop-title">Biblioteca de referências</div>${S.library.length
+    ? `<div class="lib-scroll"><div class="lib-grid">${S.library.map((e) => `<div class="lib-item ${used.has(e.id) ? 'on' : ''}" data-act="lib-pick" data-id="${esc(e.id)}" role="button" tabindex="0" aria-pressed="${used.has(e.id)}" ${tip(e.name ? `${e.name}${used.has(e.id) ? ' (em uso)' : ''}` : used.has(e.id) ? 'Em uso: clique para tirar' : 'Usar como referência')}>
+        <img src="${esc(e.url)}" alt="" loading="lazy" ${libRatio(e)}><span class="lib-check">${svg('check', 's14')}</span>
+        <button class="lib-zoom" data-act="lib-zoom" data-id="${esc(e.id)}" ${tip('Ampliar')}>${svg('maximize', 's14')}</button></div>`).join('')}</div></div>`
+    : '<p class="lib-empty">Sua biblioteca está vazia. Para guardar uma imagem, passe o mouse sobre uma referência do painel e clique no marcador, ou envie imagens pelas Configurações.</p>'}
+    <div class="lib-foot"><button data-act="lib-manage">${svg('sliders', 's16')}<span>Gerenciar a biblioteca</span></button></div>`;
+}
+// Reserva o espaço da imagem com a proporção real dela, para a grade não pular enquanto carrega
+const libRatio = (e) => (e.w > 0 && e.h > 0 ? `style="aspect-ratio:${e.w} / ${e.h}"` : '');
+
+/* ---------- ampliar uma imagem da biblioteca ---------- */
+
+// pick: aberto a partir do painel de escolha (mostra o botão de usar como referência)
+const LIBVIEW = { el: null, id: null, pick: false };
+
+function openLibraryView(id, pick) {
+  LIBVIEW.id = id;
+  LIBVIEW.pick = !!pick;
+  if (!LIBVIEW.el) {
+    const el = document.createElement('div');
+    el.className = 'lib-view';
+    el.setAttribute('role', 'dialog');
+    el.setAttribute('aria-modal', 'true');
+    el.setAttribute('aria-label', 'Imagem da biblioteca');
+    el.addEventListener('mousedown', (e) => { if (e.target === el || e.target.classList.contains('lv-stage')) closeLibraryView(); });
+    document.body.appendChild(el);
+    LIBVIEW.el = el;
+  }
+  hideTip();
+  renderLibraryView();
+}
+
+function closeLibraryView() {
+  if (!LIBVIEW.el) return;
+  LIBVIEW.el.remove();
+  LIBVIEW.el = null;
+  hideTip();
+}
+
+function renderLibraryView() {
+  const el = LIBVIEW.el;
+  if (!el) return;
+  const i = S.library.findIndex((e) => e.id === LIBVIEW.id);
+  if (i < 0) { closeLibraryView(); return; }
+  const e = S.library[i];
+  const used = LIBVIEW.pick && libraryInUse().has(e.id);
+  el.innerHTML = `
+    <div class="lv-stage">
+      <button class="lv-nav prev" data-act="lib-view-go" data-d="-1" ${i === 0 ? 'disabled' : ''} ${tip('Anterior (←)')}>${svg('chevL', 's20')}</button>
+      <img src="${esc(e.url)}" alt="${esc(e.name || 'Imagem da biblioteca')}">
+      <button class="lv-nav next" data-act="lib-view-go" data-d="1" ${i >= S.library.length - 1 ? 'disabled' : ''} ${tip('Próxima (→)')}>${svg('chevR', 's20')}</button>
+    </div>
+    <div class="lv-bar">
+      <div class="lv-info"><b>${esc(e.name || 'Imagem da biblioteca')}</b><span class="num">${e.w && e.h ? `${e.w} × ${e.h} px · ${ratioLabel(e.w, e.h)} · ` : ''}${i + 1} de ${S.library.length}</span></div>
+      ${LIBVIEW.pick ? `<button class="btn ${used ? 'line' : ''}" data-act="lib-view-use">${svg(used ? 'x' : 'imageUp', 's16')}${used ? 'Tirar das referências' : 'Usar como referência'}</button>` : ''}
+      <button class="icon-btn" data-act="lib-view-close" ${tip('Fechar (Esc)')}>${svg('x', 's20')}</button>
+    </div>`;
+}
+
+function libraryViewGo(d) {
+  const i = S.library.findIndex((e) => e.id === LIBVIEW.id) + d;
+  if (i < 0 || i >= S.library.length) return;
+  LIBVIEW.id = S.library[i].id;
+  renderLibraryView();
+}
+
+// com a imagem ampliada: Esc fecha e as setas trocam de imagem (antes dos outros atalhos da tela)
+document.addEventListener('keydown', (e) => {
+  if (!LIBVIEW.el) return;
+  if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); closeLibraryView(); }
+  else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.stopPropagation(); e.preventDefault(); libraryViewGo(e.key === 'ArrowLeft' ? -1 : 1); }
+}, true);
+function openLibrary(btn, slot) {
+  closePop();
+  LIB.slot = slot || 'refs';
+  LIB.btn = btn;
+  popEl = document.createElement('div');
+  popEl.className = 'pop lib-pop';
+  popEl.setAttribute('role', 'dialog');
+  popEl.setAttribute('aria-label', 'Biblioteca de referências');
+  document.body.appendChild(popEl);
+  renderLibraryPop();
+  const r = btn.getBoundingClientRect();
+  const pw = popEl.offsetWidth; const ph = popEl.offsetHeight;
+  let top = r.bottom + 6;
+  if (top + ph > window.innerHeight - 8) top = Math.max(8, r.top - ph - 6);
+  popEl.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - pw - 8))}px`;
+  popEl.style.top = `${top}px`;
+}
+// Usa (ou tira) uma imagem da biblioteca no painel aberto
+function libraryUse(id) {
+  const e = S.library.find((x) => x.id === id);
+  if (!e) return;
+  const ref = { id: e.id, url: e.url, w: e.w, h: e.h, kind: 'image', duration: 0 };
+  if (S.tab === 'video') {
+    vUseLibrary(ref, LIB.slot);
+    // nos quadros inicial e final a escolha fecha o painel: a imagem ampliada fecha junto
+    if (!popEl) closeLibraryView(); else renderLibraryView();
+    return;
+  }
+  const i = S.c.refs.findIndex((r) => r.id === id);
+  if (i >= 0) S.c.refs.splice(i, 1); else S.c.refs.push(ref);
+  renderRefs(); renderModels(); renderGo(); saveComposer();
+  renderLibraryPop();
+  renderLibraryView();
+}
+
+// Seção Biblioteca das Configurações: ver, enviar e tirar imagens
+function renderLibrarySettings() {
+  const box = $('#lib-set');
+  if (!box) return;
+  $('#lib-count').textContent = S.library.length ? `${S.library.length} ${S.library.length > 1 ? 'imagens' : 'imagem'}` : '';
+  box.innerHTML = `<div class="lib-scroll"><div class="lib-grid set"><button class="ref-add" data-act="lib-upload" ${tip('Enviar imagens para a biblioteca')}>${svg('imagePlus', 's20')}</button>${S.library.map((e) => `<div class="lib-thumb" data-act="lib-zoom" data-id="${esc(e.id)}" role="button" tabindex="0" ${tip(e.name ? `${e.name} (clique para ampliar)` : 'Clique para ampliar')}><img src="${esc(e.url)}" alt="" loading="lazy" ${libRatio(e)}><button class="rm" data-act="lib-remove" data-id="${esc(e.id)}" ${tip('Tirar da biblioteca')}>${svg('x', 's14')}</button></div>`).join('')}</div></div>
+    ${S.library.length ? '' : '<p class="lib-hint">Guarde aqui as imagens que você usa sempre como referência (um rosto, um produto, um estilo). Depois elas ficam a um clique, no botão de marcador ao lado das referências.</p>'}`;
 }
 
 // Um bloco por provider, na ordem em que cada um aparece no painel
@@ -974,6 +1149,7 @@ const LB = {
           </div>
           <div class="lb-actions">
             <button class="icon-btn" data-act="use-ref" data-item="${it.id}" data-idx="${idx}" ${tip('Usar como referência')}>${svg('imageUp')}</button>
+            <button class="icon-btn" data-act="lib-save-output" data-item="${it.id}" data-idx="${idx}" ${tip('Salvar na biblioteca de referências')}>${svg('bookmark')}</button>
             <button class="icon-btn" data-act="copy-img" data-item="${it.id}" data-idx="${idx}" ${tip('Copiar imagem')}>${svg('copy')}</button>
             <button class="icon-btn" data-act="download" data-item="${it.id}" data-idx="${idx}" ${tip('Baixar')}>${svg('download')}</button>
             <button class="icon-btn" data-act="to-video" data-item="${it.id}" data-idx="${idx}" ${tip('Criar um vídeo a partir desta imagem')}>${svg('film')}</button>
@@ -1373,6 +1549,8 @@ function openSettings(focusKey = false) {
         <div class="field-title"><span>Moeda dos valores</span></div>
         <div class="seg currency-seg" id="currency-seg" role="radiogroup" aria-label="Moeda dos valores"></div>
         <div class="key-status" id="fx-status"></div>
+        <div class="field-title"><span>Biblioteca de referências</span><span class="lib-count" id="lib-count"></span></div>
+        <div class="lib-set" id="lib-set"></div>
         <div class="field-title"><span id="mlist-title">Modelos no painel</span><button class="icon-btn" data-act="reload-models" ${tip('Atualizar catálogo do Atlas Cloud')} style="width:30px;height:30px">${svg('refresh', 's16')}</button></div>
         <div class="model-tools">
           <label class="search">${svg('search', 's16')}<input class="input" id="model-search" placeholder="Buscar" value="${esc(SET.q)}"></label>
@@ -1392,6 +1570,7 @@ function openSettings(focusKey = false) {
   SET.el = wrap;
   renderKeyStatus();
   renderCurrency();
+  renderLibrarySettings();
   renderModelList();
   renderAgents();
   $('#agents').addEventListener('change', (e) => {
@@ -1798,7 +1977,8 @@ function toast(msg, kind = '', action) {
 let lastChip = {};
 document.addEventListener('click', async (e) => {
   const t = e.target.closest('[data-act]');
-  if (popEl && !e.target.closest('.pop') && t?.dataset.act !== 'redo-other' && t?.dataset.act !== 'tool') closePop();
+  // clicar na imagem ampliada da biblioteca não fecha o painel de escolha que ficou atrás
+  if (popEl && !e.target.closest('.pop') && !e.target.closest('.lib-view') && !['redo-other', 'tool', 'lib-open'].includes(t?.dataset.act)) closePop();
   if (!t) return;
   const act = t.dataset.act;
   const art = t.closest('.batch');
@@ -1841,6 +2021,24 @@ document.addEventListener('click', async (e) => {
     case 'mcp-toggle': saveAgents({ enabled: !S.config.mcp?.enabled }, true); break;
     case 'mcp-connect': connectAgents(t); break;
     case 'currency': setCurrency(t.dataset.v); break;
+    case 'lib-open': if (popEl && popEl.classList.contains('lib-pop') && LIB.btn === t) closePop(); else openLibrary(t, t.dataset.slot); break;
+    case 'lib-pick': libraryUse(t.dataset.id); break;
+    case 'lib-zoom': openLibraryView(t.dataset.id, !!t.closest('.lib-pop')); break;
+    case 'lib-view-go': libraryViewGo(Number(t.dataset.d)); break;
+    case 'lib-view-use': libraryUse(LIBVIEW.id); break;
+    case 'lib-view-close': closeLibraryView(); break;
+    case 'lib-toggle': e.stopPropagation(); if (inLibrary(t.dataset.id)) await libraryRemove(t.dataset.id); else if (await libraryAdd(t.dataset.id)) toast('Guardada na biblioteca', 'ok'); break;
+    case 'lib-remove': await libraryRemove(t.dataset.id); break;
+    case 'lib-upload': $('#lib-file').click(); break;
+    case 'lib-manage': closePop(); openSettings(); setTimeout(() => $('#lib-set')?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 120); break;
+    case 'lib-save-output': {
+      try {
+        const ref = await api('/api/refs/from-output', { method: 'POST', body: { itemId: t.dataset.item, index: Number(t.dataset.idx) || 0 } });
+        if (inLibrary(ref.id)) toast('Essa imagem já está na biblioteca');
+        else if (await libraryAdd(ref.id)) toast('Guardada na biblioteca de referências', 'ok');
+      } catch (err) { toast(err.message, 'error'); }
+      break;
+    }
     case 'quit': {
       const busy = [...S.batches.values()].some((x) => x.items.some((i) => i.status === 'running' || i.status === 'queued'));
       armConfirm(t, async () => {
@@ -1949,7 +2147,7 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowRight') LB.go(1);
     return;
   }
-  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('.tile.done, .mrow, .agents-head')) { e.preventDefault(); e.target.click(); }
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('.tile.done, .mrow, .agents-head, .lib-item, .lib-thumb')) { e.preventDefault(); e.target.click(); }
 });
 
 $('#prompt').addEventListener('input', (e) => {
@@ -1966,6 +2164,7 @@ $('#tl-search').addEventListener('input', (e) => {
 });
 $('#file-input').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });
 $('#tool-file').addEventListener('change', (e) => { toolFilePicked(e.target.files[0]); e.target.value = ''; });
+$('#lib-file').addEventListener('change', (e) => { libraryUpload(e.target.files); e.target.value = ''; });
 
 document.addEventListener('paste', (e) => {
   if (e.target.closest?.('.drawer')) return;
@@ -2045,6 +2244,7 @@ function connectEvents() {
   es.addEventListener('batch-removed', (e) => removeBatch(JSON.parse(e.data).id));
   es.addEventListener('balance', (e) => { setBalance(JSON.parse(e.data)); if (SET.open) renderKeyStatus(); });
   es.addEventListener('catalog', () => { loadModels(); loadVModels(); loadAModels(); });
+  es.addEventListener('library', (e) => setLibrary(JSON.parse(e.data)));
   es.addEventListener('fx', (e) => { if (S.config.currency && S.config.currency !== 'usd') { S.config.fx = JSON.parse(e.data); refreshMoney(); } });
   es.addEventListener('quit', () => { es.close(); showStopped(); });
   es.onopen = () => { if (wasDown) { wasDown = false; syncState(); } };
@@ -2069,6 +2269,7 @@ async function syncState() {
     const st = await api('/api/state');
     S.config = { ...S.config, ...st.config };
     S.batches = new Map(st.batches.map((b) => [b.id, b]));
+    setLibrary(st.library);
     renderTimeline();
     setBalance(st.balance);
   } catch { /* tenta de novo no próximo reconectar */ }
@@ -2087,6 +2288,7 @@ async function boot() {
     const st = await api('/api/state');
     S.config = { enabledVideo: [], enabledAudio: [], ...st.config };
     for (const b of st.batches) S.batches.set(b.id, b);
+    setLibrary(st.library);
     renderTimeline();
     if (st.balance) { S.balance = st.balance; }
     renderBalance(); renderGo();

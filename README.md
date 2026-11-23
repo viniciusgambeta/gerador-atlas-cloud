@@ -33,6 +33,7 @@ No topo do painel há três abas. As três funcionam do mesmo jeito: escolha os 
 
 - **Texto → imagem**: escreva o prompt e gere.
 - **Com referência**: adicione uma ou mais imagens (clicar, arrastar ou colar com `Ctrl + V`) para editar uma imagem, manter um personagem ou seguir um estilo.
+- **Biblioteca de referências**: guarde as imagens que você usa sempre (um rosto, um produto, um estilo). Para guardar, clique no marcador que aparece sobre uma referência do painel, ou envie imagens em **Configurações → Biblioteca de referências**. Para usar, clique no botão de marcador ao lado das referências: as imagens aparecem em colunas, cada uma na proporção dela, e o botão no canto de cada uma amplia. Nada entra na biblioteca sozinho.
 - **Proporção e qualidade**: cada modelo usa o valor mais próximo do que ele aceita.
 - **No visualizador** (clique na imagem): cortar e ajustar, **aumentar a resolução**, **tirar o fundo**, usar como referência, levar para um vídeo.
 
@@ -46,7 +47,8 @@ No topo do painel há três abas. As três funcionam do mesmo jeito: escolha os 
 | **Editar** | altera um vídeo existente pelo prompt | um vídeo; imagens de apoio são opcionais |
 | **Estender** | continua um vídeo existente | um vídeo |
 
-- **Duração**: livre, dentro do que cada modelo aceita. Quando um modelo vai usar outro valor, isso aparece embaixo do controle.
+- **Duração**: livre, dentro do que cada modelo aceita. Quando um modelo vai usar outro valor, isso aparece embaixo do controle. O botão **Auto** deixa a duração por conta do modelo (ou do vídeo de referência, quando há um); sem vídeo de referência, o valor no botão Gerar aparece com `até`, porque o Atlas Cloud cota a duração mais longa.
+- **Edição pelo modo Referência**: alguns modelos (Seedance 2.5) só editam um vídeo de referência se o resultado seguir a proporção e a duração dele. Se o modelo recusar o pedido por isso, o Gerador refaz o envio sozinho com esses ajustes e avisa no resultado.
 - **Cortar um vídeo de entrada**: clique na miniatura para escolher onde o trecho começa e termina. Precisa do **ffmpeg** instalado (`winget install ffmpeg` no Windows).
 - **No visualizador**: editar, estender e **aumentar a resolução**.
 

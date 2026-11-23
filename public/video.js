@@ -10,7 +10,7 @@ const VMODES = [
   { key: 'text', label: 'Texto', long: 'Texto para vídeo', icon: 'type', kinds: ['t2v'], tip: 'Criar o vídeo só com o prompt', hint: 'Descreva o vídeo' },
   { key: 'image', label: 'Imagem', long: 'Imagem para vídeo', icon: 'image', kinds: ['i2v', 'se'], tip: 'Animar uma imagem. O quadro final é opcional', hint: 'Descreva o movimento da cena' },
   { key: 'ref', label: 'Referência', long: 'Referências', icon: 'images', kinds: ['ref'], tip: 'Usar imagens de personagens, objetos ou estilo como referência', hint: 'Descreva o vídeo com essas referências' },
-  { key: 'edit', label: 'Editar', long: 'Edição de vídeo', icon: 'wand', kinds: ['edit'], tip: 'Alterar um vídeo existente pelo prompt', hint: 'Descreva o que mudar no vídeo' },
+  { key: 'edit', label: 'Editar', long: 'Edição de vídeo', icon: 'wand', kinds: ['edit', 'ref'], tip: 'Alterar um vídeo existente pelo prompt', hint: 'Descreva o que mudar no vídeo' },
   { key: 'extend', label: 'Estender', long: 'Extensão de vídeo', icon: 'forward', kinds: ['extend'], tip: 'Continuar um vídeo existente', hint: 'Descreva como o vídeo continua' },
 ];
 const VRATIOS = ['auto', '16:9', '9:16', '1:1', '4:3', '3:4', '21:9'];
@@ -19,6 +19,8 @@ const VSTORE = 'gerador.video.v1';
 
 const vMode = (key = S.v.mode) => VMODES.find((m) => m.key === key) || VMODES[0];
 const usesVideo = (mode = S.v.mode) => mode === 'edit' || mode === 'extend';
+// Variante de um modelo que atende a um modo. No Editar, a de referência só conta quando o modelo edita por ela
+const vKindFits = (f, mode, kind) => !!f.variants[kind] && !(mode === 'edit' && kind === 'ref' && f.variants.ref.caps && !f.variants.ref.caps.edits);
 const videoPlaceholder = () => vMode().hint;
 const clock = (sec) => { const s = Math.max(0, Math.round(sec)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 
@@ -38,8 +40,8 @@ function saveVideo() {
   vSaveTimer = setTimeout(() => {
     // vídeo cortado guarda também o original e o trecho, para dar para reajustar depois
     const keep = (r) => (r && !r.uploading ? { id: r.id, url: r.url, w: r.w, h: r.h, kind: r.kind, duration: r.duration, ...(r.range && r.source ? { range: r.range, source: r.source } : {}) } : null);
-    const { prompt, mode, families, ratio, res, dur, audio } = S.v;
-    localStorage.setItem(VSTORE, JSON.stringify({ prompt, mode, families, ratio, res, dur, audio, start: keep(S.v.start), end: keep(S.v.end), video: keep(S.v.video), refs: S.v.refs.map(keep).filter(Boolean), editRefs: S.v.editRefs.map(keep).filter(Boolean) }));
+    const { prompt, mode, families, ratio, res, dur, durAuto, audio } = S.v;
+    localStorage.setItem(VSTORE, JSON.stringify({ prompt, mode, families, ratio, res, dur, durAuto: !!durAuto, audio, start: keep(S.v.start), end: keep(S.v.end), video: keep(S.v.video), refs: S.v.refs.map(keep).filter(Boolean), editRefs: S.v.editRefs.map(keep).filter(Boolean) }));
   }, 200);
 }
 
@@ -66,8 +68,8 @@ function vPick(f, mode = S.v.mode, need = vNeed()) {
   const images = need.images || 0;
   const videos = need.videos || 0;
   for (const kind of vMode(mode).kinds) {
+    if (!vKindFits(f, mode, kind)) continue;
     const v = f.variants[kind];
-    if (!v) continue;
     const c = v.caps;
     if (!c) return v; // schema ainda não carregado
     if (!c.known || !c.usable) continue;
@@ -96,7 +98,7 @@ function vWhyNot(mode = S.v.mode, need = vNeed(), f = null) {
     if (need.videos && !need.images && c?.refsRequired) return 'Precisa de pelo menos uma imagem de referência';
     return 'Não aceita imagens de referência';
   }
-  if (mode === 'edit') return need.images && (!f || f.variants.edit) ? 'Não aceita imagens de referência na edição' : 'Não edita vídeos';
+  if (mode === 'edit') return need.images && (!f || vMode('edit').kinds.some((k) => vKindFits(f, 'edit', k))) ? 'Não aceita imagens de referência na edição' : 'Não edita vídeos';
   return 'Não estende vídeos';
 }
 
@@ -106,7 +108,7 @@ const vRunnable = () => S.v.families.map((k) => S.vfam.get(k)).filter((f) => f &
 function vModelRow(f) {
   const variants = Object.values(f.variants);
   const unusable = variants.every((v) => v.caps && (!v.caps.known || !v.caps.usable));
-  const modes = VMODES.filter((m) => m.kinds.some((k) => f.variants[k])).map((m) => m.label).join(' · ');
+  const modes = VMODES.filter((m) => m.kinds.some((k) => vKindFits(f, m.key, k))).map((m) => m.label).join(' · ');
   const price = vPrice(f);
   return { unusable, sub: unusable ? 'Pede campos que o app não preenche' : `${price != null ? `<span class="num">${cost(price)}/s</span>` : ''}<span>${esc(modes)}</span>` };
 }
@@ -135,7 +137,9 @@ function renderVModes() {
 
 function vSlot(name, ref, label, kind) {
   if (!ref) {
-    return `<button class="vslot" data-act="v-pick" data-slot="${name}" ${tip(kind === 'video' ? 'Clique, arraste ou cole um vídeo' : 'Clique, arraste ou cole uma imagem')}>${svg(kind === 'video' ? 'video' : 'imagePlus', 's20')}<span>${label}</span></button>`;
+    const pick = `<button class="vslot" data-act="v-pick" data-slot="${name}" ${tip(kind === 'video' ? 'Clique, arraste ou cole um vídeo' : 'Clique, arraste ou cole uma imagem')}>${svg(kind === 'video' ? 'video' : 'imagePlus', 's20')}<span>${label}</span></button>`;
+    // nas imagens, um atalho no canto para escolher da biblioteca de referências
+    return kind === 'video' ? pick : `<div class="vslot-wrap">${pick}${libOpenBtn(name, 'vslot-lib')}</div>`;
   }
   const media = kind === 'video'
     ? `<video src="${esc(ref.url)}${ref.uploading ? '' : '#t=0.1'}" muted playsinline preload="metadata"></video>`
@@ -144,7 +148,7 @@ function vSlot(name, ref, label, kind) {
   const dur = kind === 'video' ? `<span data-fill>${ref.duration ? clock(ref.duration) : ''}</span>${ref.range ? ` de ${clock(ref.source.duration)}` : ''}` : '';
   const trim = kind === 'video' && !ref.uploading ? `<button class="trim" data-act="v-trim" ${tip(ref.range ? 'Ajustar o trecho' : 'Cortar um trecho')}>${svg('scissors', 's14')}</button>` : '';
   return `<div class="vslot filled ${ref.uploading ? 'uploading' : ''}">${media}<span class="cap num">${label}${dur ? ' · ' : ''}${dur}</span>
-    ${trim}<button class="rm" data-act="v-rm" data-slot="${name}" ${tip('Remover')}>${svg('x', 's14')}</button></div>`;
+    ${trim}${kind === 'video' ? '' : libSaveBtn(ref)}<button class="rm" data-act="v-rm" data-slot="${name}" ${tip('Remover')}>${svg('x', 's14')}</button></div>`;
 }
 
 // m:ss.d, para os pontos de corte
@@ -162,6 +166,7 @@ function vStrip(list, slot, label, hint) {
     if (!isVid(r)) {
       return `<div class="ref ${r.uploading ? 'uploading' : ''}" ${tip(`Imagem ${n}`)}>${media}
         <span class="idx num">${n}</span>
+        ${libSaveBtn(r)}
         <button class="rm" data-act="v-rm-ref" data-list="${slot}" data-i="${i}" ${tip('Remover')}>${svg('x', 's14')}</button></div>`;
     }
     // vídeo: a miniatura mostra a duração e abre o corte de trecho ao clicar
@@ -171,7 +176,33 @@ function vStrip(list, slot, label, hint) {
       <span class="idx num">${svg('play', 's14')}${n}</span>
       <button class="rm" data-act="v-rm-ref" data-list="${slot}" data-i="${i}" ${tip('Remover')}>${svg('x', 's14')}</button></div>`;
   }).join('');
-  return `<div class="refs ${list.length ? '' : 'none'}">${thumbs}<button class="ref-add" data-act="v-pick" data-slot="${slot}" ${tip(hint)}>${svg('imagePlus', 's20')}${list.length ? '' : `<span>${label}</span>`}</button></div>`;
+  return `<div class="refs ${list.length ? '' : 'none'}">${thumbs}<button class="ref-add" data-act="v-pick" data-slot="${slot}" ${tip(hint)}>${svg('imagePlus', 's20')}${list.length ? '' : `<span>${label}</span>`}</button>${libOpenBtn(slot)}</div>`;
+}
+
+/* ---------- biblioteca de referências (a lista e o painel ficam em app.js) ---------- */
+
+// Imagens da biblioteca que já estão no lugar para onde o painel aberto vai mandar
+function vLibraryInUse(slot) {
+  const v = S.v;
+  const list = slot === 'start' || slot === 'end' ? [v[slot]] : slot === 'editRefs' ? v.editRefs : v.refs;
+  return new Set(list.filter(Boolean).map((r) => r.id));
+}
+
+// Põe uma imagem da biblioteca no painel de vídeo. Nos quadros inicial e final ela ocupa o lugar e o
+// painel fecha; nas faixas de referência dá para ir marcando várias (outro clique tira).
+function vUseLibrary(ref, slot) {
+  const v = S.v;
+  if (slot === 'start' || slot === 'end') {
+    v[slot] = ref;
+    closePop();
+  } else {
+    const list = slot === 'editRefs' ? v.editRefs : v.refs;
+    const i = list.findIndex((r) => r.id === ref.id);
+    if (i >= 0) list.splice(i, 1); else list.push(ref);
+  }
+  saveVideo();
+  renderVMedia(); renderVModels(); renderVGo();
+  if (popEl && popEl.classList.contains('lib-pop')) renderLibraryPop();
 }
 
 function renderVMedia() {
@@ -278,11 +309,24 @@ function vDurSnap(n) {
   return all.reduce((best, x) => (Math.abs(x - n) < Math.abs(best - n) ? x : best), all[0]);
 }
 
+// Duração automática: o modelo escolhe (no Seedance e no Wan 3.0, por exemplo) ou acompanha o vídeo de
+// referência. Estender não tem: ali a duração é quantos segundos acrescentar.
+const vDurAuto = () => !!S.v.durAuto && S.v.mode !== 'edit' && S.v.mode !== 'extend';
+// Duração do primeiro vídeo de referência, que a duração automática acompanha em quem não sabe escolher
+const vSourceSeconds = () => (S.v.mode === 'ref' ? S.v.refs.find(isVid)?.duration || 0 : 0);
+
 function renderVDur() {
   const box = $('#vdur');
   const note = $('#vdur-note');
   box.hidden = S.v.mode === 'edit'; // o vídeo editado mantém a duração do original
   if (box.hidden) { note.hidden = true; return; }
+  const auto = vDurAuto();
+  const toggle = $('#vdur-auto');
+  toggle.hidden = S.v.mode === 'extend';
+  toggle.classList.toggle('on', auto);
+  toggle.setAttribute('aria-pressed', auto);
+  toggle.dataset.tip = auto ? 'Duração automática. Clique para escolher os segundos' : 'Deixar a duração por conta do modelo';
+  box.classList.toggle('auto', auto);
   const bounds = vDurBounds();
   let { lo, hi } = bounds;
   S.v.dur = Math.max(1, Math.round(Number(S.v.dur) || 5));
@@ -292,14 +336,24 @@ function renderVDur() {
   const num = $('#vdur-num');
   range.min = num.min = lo;
   range.max = num.max = hi;
-  range.disabled = lo === hi;
+  range.disabled = lo === hi || auto;
   if (Number(range.value) !== S.v.dur) range.value = S.v.dur;
   if (document.activeElement !== num) num.value = S.v.dur;
-  box.dataset.tip = `${S.v.mode === 'extend' ? 'Segundos a acrescentar' : 'Duração do vídeo'}: de ${lo} a ${hi} s com os modelos escolhidos`;
+  box.dataset.tip = auto ? 'Duração automática: o modelo escolhe, ou acompanha o vídeo de referência'
+    : `${S.v.mode === 'extend' ? 'Segundos a acrescentar' : 'Duração do vídeo'}: de ${lo} a ${hi} s com os modelos escolhidos`;
   // quem vai usar um valor diferente do pedido
   const diff = [];
+  const src = vSourceSeconds();
   for (const f of vRunnable()) {
-    const eff = vEffDur(vPick(f)?.caps?.dur, S.v.dur);
+    const d = vPick(f)?.caps?.dur;
+    if (auto) {
+      // quem não tem duração automática acompanha o vídeo de referência ou fica na duração padrão dele
+      if (!d || d.auto) continue;
+      if (src) diff.push(`${f.name} acompanha o vídeo de referência (${Math.round(vEffDur(d, src))} s)`);
+      else if (d.def) diff.push(`${f.name} usa ${d.def} s, o padrão dele`);
+      continue;
+    }
+    const eff = vEffDur(d, S.v.dur);
     if (eff == null) diff.push(`${f.name} define a duração sozinho`);
     else if (eff !== S.v.dur) diff.push(`${f.name} usa ${eff} s`);
   }
@@ -340,7 +394,7 @@ function vRequestBody(fams = vRunnable()) {
       start: v.mode === 'image' ? id(v.start) : null, end: v.mode === 'image' ? id(v.end) : null,
       refs: ids(images), videos: ref ? ids(v.refs.filter(isVid)) : [], video: usesVideo() ? id(v.video) : null,
     },
-    families: fams.map((f) => f.key), ratio: v.ratio, res: v.res, duration: v.dur, audio: v.audio,
+    families: fams.map((f) => f.key), ratio: v.ratio, res: v.res, duration: vDurAuto() ? 'auto' : v.dur, audio: v.audio,
   };
 }
 
@@ -350,7 +404,7 @@ function vRequestBody(fams = vRunnable()) {
 // askEstimate em app.js. A conta pela tabela (preço por segundo × duração) só entra se a cotação falhar,
 // porque ela ignora a resolução e costuma ficar bem abaixo do cobrado.
 function vTableTotal(fams) {
-  const secs = S.v.mode === 'edit' ? (S.v.video?.duration || 5) : S.v.dur;
+  const secs = S.v.mode === 'edit' ? (S.v.video?.duration || 5) : vDurAuto() ? (vSourceSeconds() || 5) : S.v.dur;
   let total = 0;
   for (const f of fams) { const p = vPick(f)?.price; if (p != null) total += p * secs; }
   return total;
@@ -498,7 +552,8 @@ function vReuseBatch(b) {
     families: fams.length ? fams : S.v.families,
     ratio: VRATIOS.includes(b.ratio) ? b.ratio : 'auto',
     res: VRES.includes(b.res) ? b.res : '720p',
-    dur: Number(b.duration) > 0 ? Math.round(Number(b.duration)) : 5,
+    dur: Number(b.duration) > 0 ? Math.round(Number(b.duration)) : S.v.dur || 5,
+    durAuto: b.duration === 'auto',
     audio: b.audio !== false,
   });
   renderComposer(); saveVideo();
@@ -526,7 +581,7 @@ function vBatchMeta(b) {
   if (i.video) parts.push(`<span class="m" ${tip('Vídeo de entrada')}>${svg('video', 's14')}${i.video.duration ? clock(i.video.duration) : ''}</span>`);
   if (!usesVideo(b.mode) && b.ratio && b.ratio !== 'auto') parts.push(`<span class="m glyph" ${tip('Proporção')}>${ratioGlyph(b.ratio, 13)}${esc(b.ratio)}</span>`);
   parts.push(`<span class="m" ${tip('Resolução pedida')}>${esc(b.res || '720p')}</span>`);
-  if (b.mode !== 'edit') parts.push(`<span class="m num" ${tip(b.mode === 'extend' ? 'Segundos acrescentados' : 'Duração pedida')}>${b.duration}s</span>`);
+  if (b.mode !== 'edit') parts.push(b.duration === 'auto' ? `<span class="m" ${tip('Duração por conta do modelo')}>duração auto</span>` : `<span class="m num" ${tip(b.mode === 'extend' ? 'Segundos acrescentados' : 'Duração pedida')}>${b.duration}s</span>`);
   if (b.audio === false) parts.push(`<span class="m" ${tip('Sem som')}>${svg('volumeOff', 's14')}</span>`);
   if (b.via === 'mcp') parts.push(agentMark(b));
   const running = b.items.some((x) => x.status === 'running' || x.status === 'queued');
@@ -647,6 +702,7 @@ document.addEventListener('click', (e) => {
     case 'trim-whole': TRIM.set(0, TRIM.dur); break;
     case 'trim-save': TRIM.save(); break;
     case 'v-audio': v.audio = !v.audio; hideTip(); renderVOpts(); renderVGo(); saveVideo(); break;
+    case 'v-dur-auto': v.durAuto = !v.durAuto; hideTip(); renderVDur(); renderVGo(); saveVideo(); break;
     case 'v-use': e.stopPropagation(); vUseOutput(t.dataset.item, Number(t.dataset.idx), t.dataset.as); break;
     case 'to-video': vUseOutput(t.dataset.item, Number(t.dataset.idx), 'start'); break;
     default: break;

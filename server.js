@@ -111,7 +111,9 @@ const DB_FILE = path.join(DATA, 'db.json');
 const config = Object.assign({ apiKey: '', enabled: null, enabledVideo: null, enabledAudio: null }, readJSON(CONFIG_FILE, {}));
 // Agentes de IA (MCP): ligado ou não, e quanto podem gastar por geração e por dia (0 = sem limite)
 config.mcp = Object.assign({ enabled: true, maxPerCall: 3, maxPerDay: 15 }, config.mcp);
-const db = Object.assign({ batches: [], refs: {} }, readJSON(DB_FILE, {}));
+// library: imagens que o usuário escolheu guardar para usar sempre como referência ({ id, name, addedAt })
+const db = Object.assign({ batches: [], refs: {}, library: [] }, readJSON(DB_FILE, {}));
+if (!Array.isArray(db.library)) db.library = [];
 const saveConfig = () => writeJSON(CONFIG_FILE, config);
 const saveDb = () => writeJSON(DB_FILE, db);
 
@@ -360,6 +362,17 @@ function refView(id) {
   return r ? { id, url: `/media/refs/${r.file}`, w: r.w, h: r.h, kind: r.kind || 'image', duration: r.duration || 0, ...(r.name ? { name: r.name } : {}) } : null;
 }
 
+// Biblioteca de referências: só entra o que o usuário manda guardar. Os arquivos são os mesmos de data/refs.
+function libraryView() {
+  return db.library.map((e) => { const r = refView(e.id); return r && r.kind === 'image' ? { id: e.id, url: r.url, w: r.w, h: r.h, name: e.name || '', addedAt: e.addedAt } : null; }).filter(Boolean);
+}
+function libraryChanged() {
+  saveDb();
+  const list = libraryView();
+  emit('library', list);
+  return list;
+}
+
 const uploading = new Map(); // id -> envio em andamento (para o mesmo arquivo não subir duas vezes ao mesmo tempo)
 async function remoteRef(id) {
   const r = db.refs[id];
@@ -538,15 +551,39 @@ function tablePrice(variant, seconds) {
   return variant.price != null ? variant.price * Math.max(1, Number(seconds) || 5) : null;
 }
 
-// Segundos que entram na conta: na edição vale a duração do vídeo de entrada
+// Duração do vídeo que o pedido acompanha: o vídeo a editar ou o primeiro vídeo de referência
+const sourceSeconds = (inputs) => inputs.video?.duration || (inputs.videos || [])[0]?.duration || 0;
+
+// Segundos que entram na conta: na edição e na duração automática vale a duração do vídeo de entrada
 function billSeconds(mode, inputs, used, duration) {
   if (used?.duration) return used.duration;
-  if (mode === 'edit' && inputs.video?.duration) return inputs.video.duration;
-  return duration;
+  const src = sourceSeconds(inputs);
+  if ((mode === 'edit' || used?.durationAuto) && src) return src;
+  return Number(duration) > 0 ? Number(duration) : 5;
 }
 
 const quoteCache = new Map(); // corpo -> { at, quote }
 const videoQuote = (variant, body, seconds) => quoteFor(body, tablePrice(variant, seconds));
+
+// Cotação de um pedido de vídeo. Com a duração por conta do modelo, o Atlas cota a duração máxima (o teto
+// que ele reserva) e cobra depois pelo que saiu. Havendo um vídeo de origem, o resultado acompanha esse
+// vídeo: cota com a duração dele. Sem vídeo de origem fica o teto, marcado com max.
+async function quoteVideo(variant, caps, body, used, mode, inputs, duration) {
+  const seconds = billSeconds(mode, inputs, used, duration);
+  if (!used?.durationAuto) return videoQuote(variant, body, seconds);
+  const d = caps.duration;
+  if (sourceSeconds(inputs)) {
+    const n = vmapper.pickDuration(d, seconds);
+    const q = await videoQuote(variant, { ...body, [d.key]: d.asString ? String(n) : n }, n);
+    return { ...q, exact: false };
+  }
+  const q = await videoQuote(variant, body, seconds);
+  return { ...q, exact: false, max: q.source === 'atlas' };
+}
+
+// O modelo recusou porque leu o pedido como edição do vídeo de referência, e nesse caso ele exige a
+// proporção e a duração do próprio vídeo ("Resubmit with ratio set to adaptive and duration set to -1")
+const FOLLOW_RE = /video[- ]editing task|ratio[^.]{0,60}\badaptive\b|duration[^.]{0,60}-1\b/i;
 
 // Pergunta ao Atlas quanto custaria (não gera nem cobra). Se não der, vale a estimativa da tabela.
 // source diz de onde veio o valor: 'atlas' (cotação do pedido inteiro) ou 'table' (preço de tabela, que
@@ -575,10 +612,12 @@ function videoParams(body, caps) {
   return out;
 }
 
-async function runVideoItem(batch, item) {
+// opts.follow: segunda tentativa, depois de o modelo recusar o pedido por entendê-lo como edição do vídeo
+async function runVideoItem(batch, item, opts = {}) {
   if (!config.apiKey) return fail(batch, item, 'Configure sua API key do Atlas Cloud.');
-  Object.assign(item, { status: 'running', error: null, startedAt: Date.now(), finishedAt: null, outputs: [], predictionId: null, cost: null });
+  Object.assign(item, { status: 'running', error: null, startedAt: opts.follow ? item.startedAt : Date.now(), finishedAt: null, outputs: [], predictionId: null, cost: null });
   emitBatch(batch);
+  let canFollow = false; // dá para tentar de novo seguindo o vídeo de referência
   try {
     await ensureCatalog();
     const fam = vfamilyByKey(item.family);
@@ -589,7 +628,13 @@ async function runVideoItem(batch, item) {
     if (!variant) throw new Error(vmapper.whyNot(batch.mode, need));
     const caps = capsById[variant.id];
     const urls = await videoInputUrls(batch);
-    const { body, error, used } = vmapper.buildBody(variant.id, caps, batch.mode, { prompt: batch.prompt, ...urls, ratio: batch.ratio, res: batch.res, duration: batch.duration, audio: batch.audio });
+    // Referência com vídeo: quando o pedido é para editar esse vídeo, o modelo exige a proporção e a duração
+    // dele. Já vai assim quando o schema avisa e o prompt pede a edição com todas as letras; nos outros casos
+    // vai como o usuário pediu e, se o modelo recusar por esse motivo, o pedido é refeito sozinho (follow).
+    const refVideo = batch.mode === 'ref' && need.videos > 0;
+    const follow = refVideo && (!!opts.follow || (caps.editFollows && vmapper.asksToEdit(batch.prompt)));
+    canFollow = refVideo && !follow;
+    const { body, error, used } = vmapper.buildBody(variant.id, caps, batch.mode, { prompt: batch.prompt, ...urls, ratio: batch.ratio, res: batch.res, duration: batch.duration, audio: batch.audio, follow, videoSeconds: sourceSeconds(batch.inputs) });
     if (error) throw new Error(error);
     item.variantId = variant.id;
     item.params = videoParams(body, caps);
@@ -597,15 +642,18 @@ async function runVideoItem(batch, item) {
     const notes = [];
     if (need.images > (used.refs ?? need.images)) notes.push(used.refs === 1 ? 'só a primeira imagem de referência' : `só as ${used.refs} primeiras imagens de referência`);
     if (need.videos > (used.videos ?? need.videos)) notes.push(used.videos === 1 ? 'só o primeiro vídeo de referência' : `só os ${used.videos} primeiros vídeos de referência`);
-    if (notes.length) item.note = `Esse modelo usou ${notes.join(' e ')}.`;
-    const quote = await videoQuote(variant, body, billSeconds(batch.mode, batch.inputs, used, batch.duration));
+    const said = notes.length ? [`Esse modelo usou ${notes.join(' e ')}.`] : [];
+    if (follow) said.push('Tratado como edição do vídeo de referência: o resultado segue a proporção e a duração dele.');
+    item.note = said.join(' ') || undefined;
+    const quote = await quoteVideo(variant, caps, body, used, batch.mode, batch.inputs, batch.duration);
     item.unitPrice = quote.price;
     item.quoteExact = quote.exact;
     const d = await limit(() => atlas.submit(config.apiKey, body, 'video'));
     item.predictionId = d.id;
     emitBatch(batch);
-    await pollUntilDone(batch, item, d);
+    await pollUntilDone(batch, item, d, canFollow ? (msg) => FOLLOW_RE.test(msg) && (runVideoItem(batch, item, { follow: true }), true) : null);
   } catch (e) {
+    if (canFollow && FOLLOW_RE.test(e.message)) return runVideoItem(batch, item, { follow: true });
     fail(batch, item, e.message);
   }
 }
@@ -661,7 +709,7 @@ function newVideoBatch({ prompt, mode, inputs, familyKeys, ratio, res, duration,
     inputs,
     ratio: ratio || 'auto',
     res: vmapper.resHeight(res) ? String(res) : '720p',
-    duration: Math.max(1, Math.min(60, Number(duration) || 5)),
+    duration: duration === 'auto' ? 'auto' : Math.max(1, Math.min(60, Number(duration) || 5)), // 'auto': o modelo decide
     audio: audio !== false,
     families: familyKeys,
     count: 1,
@@ -900,7 +948,8 @@ async function runToolItem(batch, item) {
   }
 }
 
-async function pollUntilDone(batch, item, first) {
+// retry(msg): chance de refazer o pedido quando o modelo recusa; devolve true se assumiu o item
+async function pollUntilDone(batch, item, first, retry) {
   let d = first || {};
   let misses = 0;
   const started = Date.now();
@@ -910,7 +959,11 @@ async function pollUntilDone(batch, item, first) {
   for (let i = 0; ; i++) {
     const status = String(d.status || '').toLowerCase();
     if (status === 'completed' || status === 'succeeded') return video ? finishVideo(batch, item, d) : audio ? finishAudio(batch, item, d) : finish(batch, item, d);
-    if (atlas.TERMINAL_FAIL.has(status)) return fail(batch, item, friendlyFail(atlas.errorText(d.error)));
+    if (atlas.TERMINAL_FAIL.has(status)) {
+      const msg = atlas.errorText(d.error);
+      if (retry && retry(msg)) return;
+      return fail(batch, item, friendlyFail(msg));
+    }
     if (!db.batches.includes(batch) || !batch.items.includes(item)) return; // apagado no meio
     if (Date.now() - started > maxMin * 60e3) return fail(batch, item, `A geração passou de ${maxMin} minutos e foi abandonada.`);
     await sleep(i < 4 ? 1200 : i < 20 ? 2000 : video ? 5000 : 3500);
@@ -1181,6 +1234,7 @@ function stateView() {
       fx: wantsBrl() && fx.rate ? fx : null,
     },
     batches: db.batches,
+    library: libraryView(),
     balance: balanceState,
   };
 }
@@ -1375,6 +1429,22 @@ route('POST', '/api/refs/from-output', async (req, res) => {
   send(res, 200, ref);
 });
 
+// Guarda na biblioteca uma imagem já enviada: { id, name? }
+route('POST', '/api/library', async (req, res) => {
+  const b = await readJsonBody(req);
+  const ref = refView(String(b.id || ''));
+  if (!ref) return send(res, 404, { error: 'Imagem não encontrada.' });
+  if (ref.kind !== 'image') return send(res, 400, { error: 'A biblioteca guarda só imagens.' });
+  if (!db.library.some((e) => e.id === ref.id)) db.library.unshift({ id: ref.id, name: String(b.name || '').trim().slice(0, 80), addedAt: Date.now() });
+  send(res, 200, { library: libraryChanged() });
+});
+
+// Tira da biblioteca (o arquivo continua em data/refs: gerações antigas podem estar usando)
+route('DELETE', '/api/library/([\\w-]+)', (req, res, url, m) => {
+  db.library = db.library.filter((e) => e.id !== m[1]);
+  send(res, 200, { library: libraryChanged() });
+});
+
 function cleanRefs(list) {
   return (Array.isArray(list) ? list : []).map((r) => refView(typeof r === 'string' ? r : r?.id)).filter(Boolean);
 }
@@ -1429,14 +1499,14 @@ async function estimateVideo(r) {
     const empty = r.mode === 'ref' && !need.images && !need.videos;
     // o preço não depende do texto: um prompt fixo evita recalcular a cada tecla
     const built = vmapper.buildBody(variant.id, caps, r.mode, {
-      prompt: 'video', ratio: r.ratio, res: r.res, duration: r.duration, audio: r.audio,
+      prompt: 'video', ratio: r.ratio, res: r.res, duration: r.duration, audio: r.audio, videoSeconds: sourceSeconds(r.inputs),
       start: urls.start || PLACEHOLDER, end: r.inputs.end ? urls.end || PLACEHOLDER : null,
       refs: empty ? [PLACEHOLDER] : fill(urls.refs), videos: fill(urls.videos), video: urls.video || PLACEHOLDER,
     });
     if (built.error) return { key, price: tablePrice(variant, billSeconds(r.mode, r.inputs, null, r.duration)), exact: false, source: 'table' };
-    const seconds = billSeconds(r.mode, r.inputs, built.used, r.duration);
-    const quote = await videoQuote(variant, built.body, seconds);
-    return { key, price: quote.price, exact: quote.exact, source: quote.source, used: built.used };
+    const quote = await quoteVideo(variant, caps, built.body, built.used, r.mode, r.inputs, r.duration);
+    // max: é o teto que o Atlas reserva quando a duração fica por conta do modelo
+    return { key, price: quote.price, exact: quote.exact, source: quote.source, used: built.used, ...(quote.max ? { max: true } : {}) };
   }));
   return withPending(items, inputs);
 }

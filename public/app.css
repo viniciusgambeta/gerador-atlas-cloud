@@ -144,6 +144,76 @@ img { display: block; }
 }
 .ref.drag-over { outline: 2px solid var(--ink); outline-offset: 2px; }
 
+/* biblioteca de referências */
+.refs.none .ref-add:not(.lib-open) { flex: 1; width: auto; }
+.refs.none .ref-add.lib-open { width: 64px; flex: none; }
+/* marcador sobre a miniatura: guarda a imagem na biblioteca (preenchido = já está lá) */
+.ref .lib, .vslot .lib {
+  position: absolute; right: 4px; bottom: 4px;
+  width: 20px; height: 20px; border-radius: 6px;
+  background: rgba(255, 255, 255, .94); color: var(--ink);
+  display: grid; place-items: center;
+  opacity: 0; transition: opacity .12s;
+}
+.vslot .lib { top: 6px; right: 32px; bottom: auto; width: 22px; height: 22px; }
+.ref:hover .lib, .ref:focus-within .lib, .vslot:hover .lib, .vslot:focus-within .lib, .ref .lib.on, .vslot .lib.on { opacity: 1; }
+.lib.on .svg { fill: currentColor; }
+.vslot-wrap { position: relative; flex: 1; min-width: 0; display: flex; }
+.vslot-wrap .vslot { flex: 1; }
+.vslot-lib {
+  position: absolute; top: 6px; right: 6px; width: 28px; height: 28px; border-radius: 8px;
+  background: var(--field); color: var(--muted); box-shadow: 0 0 0 1px var(--line-2);
+  display: grid; place-items: center; transition: color .12s, box-shadow .12s;
+}
+.vslot-lib:hover { color: var(--ink); box-shadow: 0 0 0 1px var(--muted); }
+.vslot-lib .svg { width: 16px; height: 16px; }
+.pop.lib-pop { width: 392px; max-width: calc(100vw - 16px); max-height: min(580px, 82vh); padding: 8px; display: flex; flex-direction: column; overflow: hidden; z-index: 65; }
+/* a rolagem fica num invólucro: colunas com altura limitada cresceriam para o lado em vez de rolar */
+.lib-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 3px; scrollbar-width: thin; }
+/* masonry: colunas de mesma largura e cada imagem na proporção real dela */
+.lib-grid { columns: 3; column-gap: 6px; }
+.lib-grid.set { columns: 4; column-gap: 8px; }
+.lib-item, .lib-thumb {
+  position: relative; display: block; width: 100%; margin: 0 0 6px; break-inside: avoid;
+  border-radius: 9px; overflow: hidden; background: var(--track); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .06);
+  cursor: pointer; outline: none;
+}
+.lib-thumb { margin-bottom: 8px; cursor: zoom-in; }
+.lib-item img, .lib-thumb img { width: 100%; height: auto; display: block; transition: transform .16s var(--ease); }
+.lib-item:hover img, .lib-thumb:hover img { transform: scale(1.04); }
+.lib-item:focus-visible, .lib-thumb:focus-visible { box-shadow: 0 0 0 2px var(--ink); }
+.lib-item.on { box-shadow: 0 0 0 2px var(--ink); }
+.lib-check { position: absolute; right: 5px; top: 5px; width: 18px; height: 18px; border-radius: 50%; background: var(--ink); color: #fff; display: none; place-items: center; }
+.lib-item.on .lib-check { display: grid; }
+.pop.lib-pop .lib-zoom, .lib-thumb .rm {
+  position: absolute; width: 22px; height: 22px; padding: 0; border-radius: 6px;
+  background: rgba(255, 255, 255, .94); color: var(--ink);
+  display: grid; place-items: center; opacity: 0; transition: opacity .12s;
+}
+.pop.lib-pop .lib-zoom { left: 5px; bottom: 5px; }
+.lib-thumb .rm { right: 5px; top: 5px; }
+.pop.lib-pop .lib-zoom:hover { background: #fff; }
+.lib-item:hover .lib-zoom, .lib-item:focus-within .lib-zoom, .lib-thumb:hover .rm, .lib-thumb:focus-within .rm { opacity: 1; }
+.lib-grid.set .ref-add { width: 100%; height: auto; aspect-ratio: 1; margin: 0 0 8px; break-inside: avoid; }
+
+/* imagem da biblioteca ampliada */
+.lib-view { position: fixed; inset: 0; z-index: 86; display: flex; flex-direction: column; background: rgba(250, 250, 249, .96); backdrop-filter: blur(8px); animation: fadein .14s ease-out; }
+.lv-stage { flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center; gap: 14px; padding: 22px 18px 10px; }
+.lv-stage img { max-width: calc(100% - 120px); max-height: 100%; object-fit: contain; border-radius: 12px; box-shadow: 0 18px 60px rgba(0, 0, 0, .16), 0 0 0 1px rgba(0, 0, 0, .06); background: var(--track); }
+.lv-nav { flex: none; width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; background: var(--field); color: var(--ink); box-shadow: var(--shadow-sm), 0 0 0 1px var(--line); transition: transform .12s var(--ease); }
+.lv-nav:hover:not(:disabled) { transform: scale(1.06); }
+.lv-nav:disabled { opacity: .25; cursor: default; }
+.lv-bar { flex: none; display: flex; align-items: center; justify-content: center; gap: 14px; padding: 10px 18px 20px; }
+.lv-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; max-width: 50vw; font-size: 12.5px; color: var(--muted); }
+.lv-info b { font-size: 14px; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lv-bar .btn { flex: none; }
+.lib-empty { margin: 4px 10px 10px; font-size: 12.5px; line-height: 1.5; color: var(--muted); }
+.lib-foot { flex: none; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); }
+.pop.lib-pop .lib-foot button { color: var(--soft); font-size: 13px; }
+.lib-count { font-weight: 500; color: var(--muted); font-size: 12.5px; }
+.lib-set .lib-scroll { max-height: 340px; }
+.lib-hint { margin: 8px 0 0; font-size: 12.5px; line-height: 1.45; color: var(--muted); }
+
 /* entradas do vídeo: quadro inicial e final, ou o vídeo a editar */
 .vmedia { display: flex; gap: 8px; }
 .vmedia:empty { display: none; }
@@ -336,6 +406,12 @@ button.vslot:hover { border-color: var(--muted); color: var(--ink); background: 
 .vdur-num::-webkit-outer-spin-button, .vdur-num::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .vdur-num:focus { box-shadow: 0 0 0 2px var(--ink); }
 .vdur-unit { margin: 0 6px 0 -6px; font-size: 13px; font-weight: 600; color: var(--muted); }
+/* duração por conta do modelo: some o campo dos segundos e a régua fica apagada */
+.vdur-auto { flex: none; height: 26px; padding: 0 9px; border-radius: 7px; font-size: 12.5px; font-weight: 600; color: var(--muted); transition: background .12s, color .12s, box-shadow .12s; }
+.vdur-auto:hover { color: var(--ink); }
+.vdur-auto.on { background: var(--field); color: var(--ink); box-shadow: var(--shadow-sm), 0 0 0 1px var(--line); }
+.vdur.auto .range { opacity: .35; pointer-events: none; }
+.vdur.auto .vdur-num, .vdur.auto .vdur-unit { display: none; }
 .vdur-note { flex: 1 1 100%; margin: -2px 2px 0; font-size: 12px; line-height: 1.45; color: var(--muted); }
 .seg.count { transition: opacity .18s var(--ease), transform .18s var(--ease); }
 .seg.count.hidden { opacity: 0; transform: translateX(-6px); pointer-events: none; }
