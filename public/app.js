@@ -61,6 +61,7 @@ const ICONS = {
   plus: '<path d="M5 12h14M12 5v14"/>',
   maximize: '<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>',
   bookmark: '<path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/>',
+  box: '<path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/>',
   eraser: '<path d="m7 21-4.3-4.3a1 1 0 0 1 0-1.4l9.6-9.6a2 2 0 0 1 2.8 0l5.6 5.6a2 2 0 0 1 0 2.8L13 21"/><path d="M22 21H7M5 11l9 9"/>',
 };
 
@@ -140,7 +141,9 @@ function paintEstimate(keys, tableTotal, reason, verb = 'Gerar') {
   else if (waiting) el.innerHTML = '<span class="mini-spin"></span>';
   else el.innerHTML = `${cap ? 'até ' : exact ? '' : '≈ '}${costHTML(total)}`;
   const how = waiting ? ', calculando o custo…' : total > 0 ? `, custo ${exact ? 'calculado pelo Atlas Cloud' : cap ? 'máximo (com a duração automática, o Atlas Cloud cota a mais longa que o modelo pode gerar)' : quoted ? 'estimado pelo Atlas Cloud' : 'estimado pela tabela (o cobrado pode ser maior)'}: ${cost(total)}` : '';
-  $('#go').dataset.tip = reason || `${verb} (${MOD} + Enter)${how}`;
+  const split = quoted ? Math.max(0, ...keys.map((k) => q.find((x) => x.key === k).parts || 0)) : 0;
+  const long = split > 1 ? `. Texto longo: sai em até ${split} partes, unidas num áudio só` : '';
+  $('#go').dataset.tip = reason || `${verb} (${MOD} + Enter)${how}${long}`;
 }
 
 function dayKey(ts) {
@@ -185,8 +188,8 @@ const STORE_KEY = 'gerador.composer.v1';
 const TAB_KEY = 'gerador.tab';
 
 const S = {
-  tab: 'image', // aba aberta: 'image', 'video' ou 'audio'
-  config: { hasKey: false, enabled: [], enabledVideo: [], enabledAudio: [], dataDir: '' },
+  tab: 'image', // aba aberta: 'image', 'video', 'audio' ou '3d'
+  config: { hasKey: false, enabled: [], enabledVideo: [], enabledAudio: [], enabled3d: [], dataDir: '' },
   // aba de áudio (a lógica dela fica em audio.js)
   afamilies: [],
   afam: new Map(),
@@ -224,7 +227,8 @@ function loadComposer() {
   } catch { /* ignora */ }
   loadVideo();
   loadAudio();
-  try { const t = localStorage.getItem(TAB_KEY); if (t === 'video' || t === 'audio') S.tab = t; } catch { /* ignora */ }
+  loadD3();
+  try { const t = localStorage.getItem(TAB_KEY); if (t === 'video' || t === 'audio' || t === '3d') S.tab = t; } catch { /* ignora */ }
 }
 
 // Imagens, vídeos e áudios dividem a mesma tela: cada aba tem seu painel e sua linha do tempo
@@ -238,8 +242,8 @@ function clearSearch() {
   $('#tl-search').value = '';
   renderTimeline();
 }
-const cur = () => (S.tab === 'video' ? S.v : S.tab === 'audio' ? S.a : S.c); // estado do painel da aba aberta
-const saveCur = () => (S.tab === 'video' ? saveVideo() : S.tab === 'audio' ? saveAudio() : saveComposer());
+const cur = () => (S.tab === 'video' ? S.v : S.tab === 'audio' ? S.a : S.tab === '3d' ? S.d : S.c); // estado do painel da aba aberta
+const saveCur = () => (S.tab === 'video' ? saveVideo() : S.tab === 'audio' ? saveAudio() : S.tab === '3d' ? saveD3() : saveComposer());
 
 function switchTab(tab) {
   if (tab === S.tab) return;
@@ -254,7 +258,7 @@ function switchTab(tab) {
 }
 
 function renderTabs() {
-  $('#tabs').innerHTML = [['image', 'Imagens', 'image'], ['video', 'Vídeos', 'film'], ['audio', 'Áudio', 'music']]
+  $('#tabs').innerHTML = [['image', 'Imagens', 'image'], ['video', 'Vídeos', 'film'], ['audio', 'Áudio', 'music'], ['3d', '3D', 'box']]
     .map(([k, label, icon]) => `<button class="${S.tab === k ? 'on' : ''}" role="tab" aria-selected="${S.tab === k}" data-act="tab" data-v="${k}">${svg(icon, 's16')}<span>${label}</span></button>`).join('');
 }
 let saveTimer;
@@ -397,7 +401,7 @@ function libOpenBtn(slot, cls = 'ref-add lib-open') {
 
 function setLibrary(list) {
   S.library = Array.isArray(list) ? list : [];
-  if (S.tab === 'image') renderRefs(); else if (S.tab === 'video') renderVMedia();
+  if (S.tab === 'image') renderRefs(); else if (S.tab === 'video') renderVMedia(); else if (S.tab === '3d') renderDMedia();
   if (popEl && popEl.classList.contains('lib-pop')) renderLibraryPop();
   if (SET.open) renderLibrarySettings();
   if (LIBVIEW.el) renderLibraryView();
@@ -428,6 +432,7 @@ async function libraryUpload(files) {
 const LIB = { slot: 'refs', btn: null };
 function libraryInUse() {
   if (S.tab === 'video') return vLibraryInUse(LIB.slot);
+  if (S.tab === '3d') return dLibraryInUse(LIB.slot);
   return new Set(S.c.refs.map((r) => r.id));
 }
 function renderLibraryPop() {
@@ -534,6 +539,11 @@ function libraryUse(id) {
     if (!popEl) closeLibraryView(); else renderLibraryView();
     return;
   }
+  if (S.tab === '3d') {
+    dUseLibrary(ref, LIB.slot);
+    if (!popEl) closeLibraryView(); else { renderLibraryPop(); renderLibraryView(); }
+    return;
+  }
   const i = S.c.refs.findIndex((r) => r.id === id);
   if (i >= 0) S.c.refs.splice(i, 1); else S.c.refs.push(ref);
   renderRefs(); renderModels(); renderGo(); saveComposer();
@@ -568,6 +578,7 @@ function modelGroups(list, chip) {
 function renderModels() {
   if (S.tab === 'video') return renderVModels();
   if (S.tab === 'audio') return renderAModels();
+  if (S.tab === '3d') return renderDModels();
   const box = $('#models');
   if (!S.catalogLoaded) { box.innerHTML = '<div class="pgroup-chips"><span class="chip skeleton"></span><span class="chip skeleton"></span><span class="chip skeleton"></span></div>'; return; }
   const list = enabledFamilies();
@@ -602,7 +613,7 @@ function ratioButton(r, on, act, label) {
 }
 
 function renderRatios() {
-  if (S.tab === 'audio') { $('#ratios').hidden = true; return; }
+  if (S.tab === 'audio' || S.tab === '3d') { $('#ratios').hidden = true; return; }
   if (S.tab === 'video') return renderVRatios();
   $('#ratios').hidden = false;
   $('#ratios').innerHTML = RATIOS.map((r) => ratioButton(r, S.c.ratio === r, 'ratio')).join('');
@@ -624,6 +635,7 @@ function runnable() {
 function renderGo() {
   if (S.tab === 'video') return renderVGo();
   if (S.tab === 'audio') return renderAGo();
+  if (S.tab === '3d') return renderDGo();
   const btn = $('#go');
   const fams = runnable();
   const hasRefs = S.c.refs.length > 0;
@@ -658,6 +670,7 @@ function renderComposer() {
   $('#prompt-clear').classList.toggle('show', !!cur().prompt);
   if (S.tab === 'video') { renderVModes(); renderVMedia(); renderVOpts(); }
   else if (S.tab === 'audio') renderAudioPanel();
+  else if (S.tab === '3d') { renderD3Panel(); renderRatios(); return; } // o painel 3D desenha tudo o que é dele
   else { renderRefs(); renderSegs(); }
   renderModels();
   renderRatios();
@@ -675,6 +688,7 @@ function autosize() {
 async function addFiles(files) {
   if (S.tab === 'video') return vAddFiles(files);
   if (S.tab === 'audio') return aAddFiles(files);
+  if (S.tab === '3d') return dAddFiles(files);
   const imgs = [...files].filter((f) => f.type.startsWith('image/'));
   if (!imgs.length) return;
   for (const file of imgs) {
@@ -702,6 +716,7 @@ async function addFiles(files) {
 
 async function useAsRef(itemId, index) {
   if (S.tab === 'video') return vUseOutput(itemId, index);
+  if (S.tab === '3d') return dUseOutput(itemId, index);
   try {
     const ref = await api('/api/refs/from-output', { method: 'POST', body: { itemId, index } });
     if (!S.c.refs.some((r) => r.id === ref.id)) S.c.refs.push(ref);
@@ -718,6 +733,7 @@ async function generate() {
   clearSearch(); // o que vai ser gerado precisa aparecer, mesmo que não combine com a busca
   if (S.tab === 'video') return vGenerate();
   if (S.tab === 'audio') return aGenerate();
+  if (S.tab === '3d') return dGenerate();
   const btn = $('#go');
   if (!S.config.hasKey) return openSettings(true);
   if (btn.disabled) { toast(btn.dataset.tip, 'error'); return; }
@@ -756,7 +772,7 @@ function renderEmpty() {
     return;
   }
   $('#timeline').innerHTML = `<div class="empty-state"><div class="frames"><i></i><i></i><i></i></div>
-    <h3>${S.tab === 'video' ? 'Nenhum vídeo gerado ainda' : S.tab === 'audio' ? 'Nenhum áudio gerado ainda' : 'Nada gerado ainda'}</h3><p>${S.tab === 'audio' ? 'Escreva o texto' : 'Escreva um prompt'}, escolha os modelos e aperte <kbd>${MOD}</kbd> <kbd>Enter</kbd></p></div>`;
+    <h3>${S.tab === 'video' ? 'Nenhum vídeo gerado ainda' : S.tab === 'audio' ? 'Nenhum áudio gerado ainda' : S.tab === '3d' ? 'Nenhum modelo 3D gerado ainda' : 'Nada gerado ainda'}</h3><p>${S.tab === 'audio' ? 'Escreva o texto' : S.tab === '3d' ? 'Descreva o objeto ou envie uma imagem dele' : 'Escreva um prompt'}, escolha os modelos e aperte <kbd>${MOD}</kbd> <kbd>Enter</kbd></p></div>`;
 }
 
 function ensureDay(key) {
@@ -790,7 +806,7 @@ function updateDayStats(key) {
   }
   $('.d-cost', sec).innerHTML = imgs ? `${est ? '≈ ' : ''}${costHTML(total)}` : '';
   $('.d-cost', sec).dataset.tip = 'Gasto do dia';
-  $('.d-count', sec).innerHTML = imgs ? `${svg(S.tab === 'video' ? 'film' : S.tab === 'audio' ? 'music' : 'image', 's14')}${imgs}` : '';
+  $('.d-count', sec).innerHTML = imgs ? `${svg(S.tab === 'video' ? 'film' : S.tab === 'audio' ? 'music' : S.tab === '3d' ? 'box' : 'image', 's14')}${imgs}` : '';
 }
 
 function createBatchEl(b) {
@@ -831,6 +847,7 @@ function batchMeta(b) {
   if (b.tool) return toolMeta(b);
   if (b.kind === 'video') return vBatchMeta(b);
   if (b.kind === 'audio') return aBatchMeta(b);
+  if (b.kind === '3d') return dBatchMeta(b);
   const fams = [];
   for (const it of b.items) if (!fams.some((f) => f.family === it.family)) fams.push(it);
   const parts = fams.map((it) => `<span class="m">${avatarHTML(it.family, it.familyName, it.avatar)}${esc(it.familyName)}</span>`);
@@ -860,9 +877,11 @@ function tileSpecs(b) {
   for (const it of b.items) {
     const badge = `<span class="badge"><span>${esc(it.familyName)}</span></span>`;
     if (it.status === 'queued' || it.status === 'running') {
+      // fala longa, gerada em partes: mostra quantas já ficaram prontas
+      const prog = it.progress ? `${it.progress.done} de ${it.progress.total} partes` : '';
       specs.push({
-        key: `${it.id}:p`, sig: 'p', item: it,
-        make: () => `<div class="tile pending${b.kind === 'audio' ? ' audio' : ''}" style="aspect-ratio:${tileRatio(b, it)}">${badge}<span class="clock" data-start="${it.startedAt || Date.now()}"><span class="mini-spin"></span><span>0s</span></span></div>`,
+        key: `${it.id}:p`, sig: `p${prog}`, item: it,
+        make: () => `<div class="tile pending${b.kind === 'audio' ? ' audio' : ''}" style="aspect-ratio:${tileRatio(b, it)}">${prog ? `<span class="badge"><span>${esc(it.familyName)} · ${prog}</span></span>` : badge}<span class="clock" data-start="${it.startedAt || Date.now()}"><span class="mini-spin"></span><span>0s</span></span></div>`,
       });
     } else if (it.status === 'failed') {
       specs.push({
@@ -874,6 +893,8 @@ function tileSpecs(b) {
       });
     } else if (b.kind === 'audio') {
       specs.push(...aTileSpecs(b, it));
+    } else if (b.kind === '3d') {
+      specs.push(...dTileSpecs(b, it, multi ? badge : ''));
     } else {
       it.outputs.forEach((out, idx) => {
         const per = it.cost != null ? it.cost / it.outputs.length : null;
@@ -929,7 +950,7 @@ function updateBatchEl(art, b, initial) {
       node = fresh;
       art._tiles.set(s.key, node);
     }
-    if (s.sig === 'p') art._pendingSeen.add(s.item.id);
+    if (s.sig[0] === 'p') art._pendingSeen.add(s.item.id);
     const want = prev ? prev.nextSibling : grid.firstChild;
     if (want !== node) grid.insertBefore(node, want);
     prev = node;
@@ -1019,6 +1040,7 @@ function downloadImage(b, it, idx) {
 function reuseBatch(b) {
   if (b.kind === 'video') return vReuseBatch(b);
   if (b.kind === 'audio') return aReuseBatch(b);
+  if (b.kind === '3d') return dReuseBatch(b);
   const enabled = new Set(S.config.enabled);
   const fams = b.families.filter((k) => enabled.has(k));
   Object.assign(S.c, {
@@ -1064,7 +1086,12 @@ const LB = {
   build() {
     const out = [];
     const batches = [...S.batches.values()].filter(visible).sort((a, b) => b.createdAt - a.createdAt);
-    for (const b of batches) for (const it of b.items) if (it.status === 'done') it.outputs.forEach((o, idx) => out.push({ b, it, idx, o }));
+    for (const b of batches) {
+      for (const it of b.items) {
+        if (it.status !== 'done') continue;
+        if (b.kind === '3d') { if (it.outputs.length) out.push({ b, it, idx: 0, o: it.outputs[0] }); } else it.outputs.forEach((o, idx) => out.push({ b, it, idx, o }));
+      }
+    }
     return out;
   },
   mode: 'view', // 'view' ou 'crop'
@@ -1115,6 +1142,8 @@ const LB = {
     const sig = JSON.stringify([it.id, idx, o.url, this.i, this.list.length, it.cost, it.note, b.prompt]);
     if (sig === this.sig) return; // nada mudou nesta imagem: evita piscar durante outras gerações
     this.sig = sig;
+    if (b.kind === '3d') return dRenderCard(this, x); // o palco 3D só é refeito quando o modelo muda
+    dUnmount();
     if (b.kind === 'video') { $('.lb-card', this.el).innerHTML = vCardHTML(this, x); return; }
     const facts = [
       o.w ? ['Tamanho', `${o.w} × ${o.h} px`] : null,
@@ -1153,6 +1182,7 @@ const LB = {
             <button class="icon-btn" data-act="copy-img" data-item="${it.id}" data-idx="${idx}" ${tip('Copiar imagem')}>${svg('copy')}</button>
             <button class="icon-btn" data-act="download" data-item="${it.id}" data-idx="${idx}" ${tip('Baixar')}>${svg('download')}</button>
             <button class="icon-btn" data-act="to-video" data-item="${it.id}" data-idx="${idx}" ${tip('Criar um vídeo a partir desta imagem')}>${svg('film')}</button>
+            <button class="icon-btn" data-act="to-3d" data-item="${it.id}" data-idx="${idx}" ${tip('Criar um modelo 3D a partir desta imagem')}>${svg('box')}</button>
             <button class="icon-btn" data-act="variation" data-item="${it.id}" ${tip('Gerar outra com este modelo')}>${svg('refresh')}</button>
             <button class="icon-btn" data-act="lb-reuse" data-batch="${b.id}" ${tip('Levar para o painel e editar')}>${svg('pencil')}</button>
             <button class="icon-btn" data-act="del-item" data-item="${it.id}" ${tip('Apagar')}>${svg('trash')}</button>
@@ -1164,6 +1194,7 @@ const LB = {
   go(d) { const n = this.i + d; if (n < 0 || n >= this.list.length) return; this.i = n; this.render(); },
   close() {
     CROP.teardown();
+    dUnmount();
     this.open = false;
     this.el?.remove();
     this.el = null;
@@ -1741,13 +1772,14 @@ function renderModelList() {
   // a lista acompanha a aba aberta: modelos de imagem ou de vídeo
   const video = S.tab === 'video';
   const audio = S.tab === 'audio';
-  const all = audio ? S.afamilies : video ? S.vfamilies : S.families;
-  const loaded = audio ? S.acatalogLoaded : video ? S.vcatalogLoaded : S.catalogLoaded;
-  const on = new Set((audio ? S.config.enabledAudio : video ? S.config.enabledVideo : S.config.enabled) || []);
-  $('#mlist-title').textContent = audio ? 'Modelos de áudio no painel' : video ? 'Modelos de vídeo no painel' : 'Modelos de imagem no painel';
+  const d3 = S.tab === '3d';
+  const all = d3 ? S.dfamilies : audio ? S.afamilies : video ? S.vfamilies : S.families;
+  const loaded = d3 ? S.dcatalogLoaded : audio ? S.acatalogLoaded : video ? S.vcatalogLoaded : S.catalogLoaded;
+  const on = new Set((d3 ? S.config.enabled3d : audio ? S.config.enabledAudio : video ? S.config.enabledVideo : S.config.enabled) || []);
+  $('#mlist-title').textContent = d3 ? 'Modelos 3D no painel' : audio ? 'Modelos de áudio no painel' : video ? 'Modelos de vídeo no painel' : 'Modelos de imagem no painel';
   $('#model-filter').innerHTML = `<button class="${SET.filter === 'all' ? 'on' : ''}" data-act="mfilter" data-v="all">Todos</button><button class="${SET.filter === 'on' ? 'on' : ''}" data-act="mfilter" data-v="on">Ativos ${on.size}</button>`;
   if (!loaded) { box.innerHTML = '<div class="key-status"><span class="mini-spin"></span>Carregando catálogo…</div>'; return; }
-  if (!all.length) { box.innerHTML = `<div class="key-status err">${svg('alert', 's14')}${esc((audio ? S.acatalogError : video ? S.vcatalogError : S.catalogError) || 'Catálogo vazio.')}</div>`; return; }
+  if (!all.length) { box.innerHTML = `<div class="key-status err">${svg('alert', 's14')}${esc((d3 ? S.dcatalogError : audio ? S.acatalogError : video ? S.vcatalogError : S.catalogError) || 'Catálogo vazio.')}</div>`; return; }
   const q = SET.q.trim().toLowerCase();
   let list = all.filter((f) => (SET.filter === 'on' ? on.has(f.key) : true));
   if (q) list = list.filter((f) => `${f.name} ${f.provider} ${providerName(f)} ${f.key}`.toLowerCase().includes(q));
@@ -1758,7 +1790,7 @@ function renderModelList() {
   let group = null;
   for (const { f, p } of list) {
     if (p !== group) { group = p; html += `<div class="mgroup">${esc(p)}</div>`; }
-    const row = audio ? aModelRow(f) : video ? vModelRow(f) : imageModelRow(f);
+    const row = d3 ? dModelRow(f) : audio ? aModelRow(f) : video ? vModelRow(f) : imageModelRow(f);
     html += `<div class="mrow ${row.unusable ? 'unusable' : ''}" data-act="toggle-enabled" data-key="${esc(f.key)}" role="switch" aria-checked="${on.has(f.key)}" tabindex="0">
       ${avatarHTML(f.key, f.name, f.avatar)}
       <div class="mname"><b>${esc(f.name)}</b><span>${row.sub}</span></div>
@@ -1777,7 +1809,7 @@ function imageModelRow(f) {
 }
 
 function toggleEnabled(key) {
-  const field = S.tab === 'audio' ? 'enabledAudio' : S.tab === 'video' ? 'enabledVideo' : 'enabled';
+  const field = S.tab === '3d' ? 'enabled3d' : S.tab === 'audio' ? 'enabledAudio' : S.tab === 'video' ? 'enabledVideo' : 'enabled';
   const list = [...(S.config[field] || [])];
   const i = list.indexOf(key);
   if (i >= 0) list.splice(i, 1); else list.push(key);
@@ -1785,6 +1817,7 @@ function toggleEnabled(key) {
   if (i < 0 && !cur().families.length) cur().families = [key];
   renderModelList(); renderModels(); renderSegs(); renderGo();
   if (S.tab === 'audio') renderAOpts();
+  if (S.tab === '3d') renderD3Panel();
   saveCur();
   clearTimeout(SET.saveT);
   SET.saveT = setTimeout(async () => {
@@ -1793,8 +1826,10 @@ function toggleEnabled(key) {
       for (const f of r.families || []) { S.fam.set(f.key, f); const j = S.families.findIndex((x) => x.key === f.key); if (j >= 0) S.families[j] = f; }
       for (const f of r.videoFamilies || []) { S.vfam.set(f.key, f); const j = S.vfamilies.findIndex((x) => x.key === f.key); if (j >= 0) S.vfamilies[j] = f; }
       for (const f of r.audioFamilies || []) { S.afam.set(f.key, f); const j = S.afamilies.findIndex((x) => x.key === f.key); if (j >= 0) S.afamilies[j] = f; }
+      for (const f of r.d3Families || []) { S.dfam.set(f.key, f); const j = S.dfamilies.findIndex((x) => x.key === f.key); if (j >= 0) S.dfamilies[j] = f; }
       renderModels(); renderGo(); renderModelList();
       if (S.tab === 'audio') renderAOpts();
+      if (S.tab === '3d') renderD3Panel();
     } catch (e) { toast(e.message, 'error'); }
   }, 350);
 }
@@ -2005,9 +2040,9 @@ document.addEventListener('click', async (e) => {
     case 'close-settings': closeSettings(); break;
     case 'refresh-balance': refreshBalance(); break;
     case 'reload-models':
-      S.catalogLoaded = false; S.vcatalogLoaded = false; S.acatalogLoaded = false; renderModels(); renderModelList();
+      S.catalogLoaded = false; S.vcatalogLoaded = false; S.acatalogLoaded = false; S.dcatalogLoaded = false; renderModels(); renderModelList();
       try { await api('/api/models/refresh', { method: 'POST' }); } catch { /* segue */ }
-      await Promise.all([loadModels(), loadVModels(), loadAModels()]);
+      await Promise.all([loadModels(), loadVModels(), loadAModels(), loadDModels()]);
       break;
     case 'toggle-key': {
       const i = $('#key-input');
@@ -2243,7 +2278,8 @@ function connectEvents() {
   es.addEventListener('batch', (e) => upsertBatch(JSON.parse(e.data)));
   es.addEventListener('batch-removed', (e) => removeBatch(JSON.parse(e.data).id));
   es.addEventListener('balance', (e) => { setBalance(JSON.parse(e.data)); if (SET.open) renderKeyStatus(); });
-  es.addEventListener('catalog', () => { loadModels(); loadVModels(); loadAModels(); });
+  es.addEventListener('catalog', () => { loadModels(); loadVModels(); loadAModels(); loadDModels(); });
+  es.addEventListener('catalog3d', () => loadDModels()); // chegaram os preços dos modelos 3D que não estão no painel
   es.addEventListener('library', (e) => setLibrary(JSON.parse(e.data)));
   es.addEventListener('fx', (e) => { if (S.config.currency && S.config.currency !== 'usd') { S.config.fx = JSON.parse(e.data); refreshMoney(); } });
   es.addEventListener('quit', () => { es.close(); showStopped(); });
@@ -2286,7 +2322,7 @@ async function boot() {
   renderBalance();
   try {
     const st = await api('/api/state');
-    S.config = { enabledVideo: [], enabledAudio: [], ...st.config };
+    S.config = { enabledVideo: [], enabledAudio: [], enabled3d: [], ...st.config };
     for (const b of st.batches) S.batches.set(b.id, b);
     setLibrary(st.library);
     renderTimeline();
@@ -2296,6 +2332,7 @@ async function boot() {
     loadModels();
     loadVModels();
     loadAModels();
+    loadDModels();
     if (!S.config.hasKey) openSettings(true);
     else refreshBalance();
   } catch (e) {

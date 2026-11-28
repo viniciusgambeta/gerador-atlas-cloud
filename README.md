@@ -1,6 +1,6 @@
 # Gerador
 
-Estúdio que roda no seu computador para criar **imagens, vídeos e áudios** com os modelos do [Atlas Cloud](https://www.atlascloud.ai). Você escolhe os modelos, escreve o que quer e compara os resultados lado a lado, numa linha do tempo.
+Estúdio que roda no seu computador para criar **imagens, vídeos, áudios e modelos 3D** com os modelos do [Atlas Cloud](https://www.atlascloud.ai). Você escolhe os modelos, escreve o que quer e compara os resultados lado a lado, numa linha do tempo.
 
 Ele também funciona como **servidor MCP**: o Claude e o ChatGPT instalados no seu computador conseguem gerar pelo Gerador, a seu pedido.
 
@@ -27,7 +27,7 @@ No Windows o Gerador roda em segundo plano: a janela preta aparece por um instan
 
 ## Usar
 
-No topo do painel há três abas. As três funcionam do mesmo jeito: escolha os modelos, escreva o pedido e aperte **Gerar** (`Ctrl + Enter`).
+No topo do painel há quatro abas. Todas funcionam do mesmo jeito: escolha os modelos, escreva o pedido e aperte **Gerar** (`Ctrl + Enter`).
 
 ### Imagens
 
@@ -61,8 +61,23 @@ No topo do painel há três abas. As três funcionam do mesmo jeito: escolha os 
 | **Efeitos** | cria um efeito sonoro ou um som ambiente, com duração e opção de loop |
 | **Transcrever** | passa um áudio (ou o áudio de um vídeo) para texto |
 
+- **Texto longo na Fala**: cada modelo aguenta um tanto de texto por pedido (no ElevenLabs v4, cerca de 2.400 caracteres, e 4.000 no v4 Turbo: acima disso a conexão do Atlas Cloud com o ElevenLabs pode cair antes de o áudio ficar pronto). Quando o texto passa disso, o Gerador divide em partes no fim de um parágrafo ou de uma frase, gera cada uma e junta tudo num áudio só. Uma marcação de entonação no começo do texto, como `[tom calmo]`, é repetida em cada parte. O custo é a soma das partes.
 - **Voz clonada**: há dois caminhos, os dois no painel de vozes. Nos modelos **ElevenLabs v4**, cole o ID de uma voz do ElevenLabs, inclusive uma que você clonou no site deles (o Atlas Cloud não cria o clone, só usa o ID). No **Seed Audio 1.0**, envie de 5 a 30 segundos de uma voz e o modelo fala o seu texto imitando a amostra.
 - **Vídeo falante**: em qualquer áudio gerado, o botão de filme pede uma foto (ou um vídeo) e cria um vídeo em que a pessoa fala aquele áudio. O resultado aparece na aba Vídeos.
+
+### 3D
+
+| Modo | O que faz | O que você envia |
+|---|---|---|
+| **Texto** | cria o modelo 3D só com o prompt | nada além do texto |
+| **Imagem** | cria o modelo a partir de uma foto do objeto | a imagem da frente; costas, esquerda e direita são opcionais |
+
+- **Várias vistas**: só a frente é obrigatória. Os modelos que aceitam mais de uma imagem (HI3D e Meshy) usam as outras vistas para não ter de adivinhar o que a foto não mostra. Quem aceita uma só usa a da frente, e o resultado avisa.
+- **Opções de cada modelo**: embaixo dos modelos aparece um bloco **Opções** para cada um escolhido, só com o que aquele modelo tem: textura, materiais PBR, quantidade de polígonos, resolução, formato do arquivo, semente. O que você não mexer fica no padrão do modelo. Opção que depende de outra (por exemplo, a topologia só vale com "Refazer a malha" ligado) fica apagada até valer.
+- **Preço**: nos modelos 3D o valor muda bastante de um para outro (de centavos a alguns dólares) e com as opções. O botão Gerar mostra sempre a cotação do Atlas Cloud para aquele pedido exato.
+- **Ver o resultado**: clique no modelo para abrir o visualizador. Arraste para girar, use a roda do mouse para aproximar e Shift (ou o botão direito) para arrastar. **Forma** mostra o modelo sem textura e **Malha** mostra as linhas dos polígonos. Ao lado ficam os números da malha e todos os arquivos para baixar.
+- **Formatos**: o visualizador abre arquivos GLB, que é o padrão de todos os modelos. Se você pedir só FBX, OBJ, STL ou USDZ, o arquivo é guardado para baixar e abrir em outro programa.
+- **A partir de uma imagem gerada**: na janela de uma imagem, o botão do cubo leva essa imagem para a aba 3D.
 
 ### Na linha do tempo
 
@@ -111,6 +126,7 @@ Sem abrir o Gerador, dá no mesmo: dois cliques em **`Conectar agentes.bat`** (W
 | `gerar_imagem` | gera imagens, com ou sem imagens de referência |
 | `gerar_video` | gera, edita ou estende vídeos, nos cinco modos da aba Vídeos |
 | `gerar_audio` | fala (com voz da lista, voz pelo ID ou clonada de um áudio), música, efeito sonoro ou transcrição |
+| `gerar_3d` | gera um modelo 3D a partir de texto ou de até quatro vistas de um objeto, com as opções de cada modelo |
 | `consultar_geracao` | acompanha uma geração e devolve o caminho dos arquivos e o custo |
 | `listar_geracoes` | lista as gerações recentes, para reaproveitar um resultado |
 | `ver_saldo` | mostra o saldo e quanto os assistentes já gastaram hoje |
@@ -168,7 +184,7 @@ claude mcp add --scope user gerador -- node "CAMINHO\mcp.js"
 
 Tudo fica na pasta `data/`, dentro da pasta do Gerador:
 
-- `data/images/`, `data/videos/` e `data/audio/`: o que foi gerado, separado por dia
+- `data/images/`, `data/videos/`, `data/audio/` e `data/models3d/`: o que foi gerado, separado por dia
 - `data/refs/`: imagens, vídeos e áudios que você enviou como entrada
 - `data/config.json`: sua API key e suas escolhas
 - `data/db.json`: o histórico da linha do tempo
@@ -186,11 +202,12 @@ O Gerador é um servidor Node.js sem dependências e uma página em JavaScript p
 |---|---|
 | `server.js` | o servidor: rotas, fila de gerações, arquivos |
 | `lib/atlas.js` | as chamadas à API do Atlas Cloud |
-| `lib/mapper.js`, `lib/vmapper.js`, `lib/amapper.js` | leem o schema de cada modelo de imagem, vídeo e áudio e montam o pedido |
+| `lib/mapper.js`, `lib/vmapper.js`, `lib/amapper.js`, `lib/dmapper.js` | leem o schema de cada modelo de imagem, vídeo, áudio e 3D e montam o pedido |
+| `lib/meshfile.js`, `lib/audjoin.js` | reconhecem os arquivos 3D (e abrem os que vêm em .zip) e juntam os áudios de uma fala longa |
 | `lib/tools.js` | ferramentas de um clique: aumentar resolução, tirar fundo, vídeo falante |
 | `lib/mcp.js`, `lib/agent.js`, `mcp.js` | o servidor MCP, as ferramentas dos assistentes e a ponte por linha de comando |
 | `conectar-agentes.js` | registra o Gerador nos assistentes instalados |
-| `public/` | a tela: `app.js` (imagens e base), `video.js`, `audio.js`, `app.css` |
+| `public/` | a tela: `app.js` (imagens e base), `video.js`, `audio.js`, `tresd.js` (aba 3D), `viewer3d.js` (visualizador de GLB em WebGL), `app.css` |
 
 Para rodar em outra porta: `PORT=8080 node server.js`.
 

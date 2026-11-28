@@ -21,6 +21,9 @@ const vmapper = require('./lib/vmapper');
 const { info: imgInfo, MIME_EXT } = require('./lib/imginfo');
 const { info: vidInfo, MIME_EXT: VIDEO_EXT } = require('./lib/vidinfo');
 const { info: audInfo, MIME_EXT: AUDIO_EXT, EXTS: AUDIO_EXTS } = require('./lib/audinfo');
+const audJoin = require('./lib/audjoin');
+const dmapper = require('./lib/dmapper');
+const meshfile = require('./lib/meshfile');
 const amapper = require('./lib/amapper');
 const tools = require('./lib/tools');
 const mcp = require('./lib/mcp');
@@ -32,12 +35,13 @@ const DATA = process.env.GERADOR_DATA || path.join(ROOT, 'data');
 const IMAGES = path.join(DATA, 'images');
 const VIDEOS = path.join(DATA, 'videos');
 const AUDIO = path.join(DATA, 'audio');
+const MODELS3D = path.join(DATA, 'models3d');
 const REFS = path.join(DATA, 'refs');
 const CACHE = path.join(DATA, 'cache');
 const START_PORT = Number(process.env.PORT) || 7777;
 const APP_ID = 'gerador-imgs';
 
-for (const d of [DATA, IMAGES, VIDEOS, AUDIO, REFS, CACHE]) fs.mkdirSync(d, { recursive: true });
+for (const d of [DATA, IMAGES, VIDEOS, AUDIO, MODELS3D, REFS, CACHE]) fs.mkdirSync(d, { recursive: true });
 
 // Em segundo plano não há janela para mostrar mensagens: elas vão para data/gerador.log
 const BACKGROUND = !!process.env.GERADOR_BG;
@@ -151,6 +155,7 @@ let catalog = readJSON(MODELS_CACHE, { at: 0, models: [] });
 let families = mapper.buildFamilies(catalog.models);
 let vfamilies = vmapper.buildFamilies(catalog.models);
 let afamilies = amapper.buildFamilies(catalog.models);
+let dfamilies = dmapper.buildFamilies(catalog.models);
 let catalogError = null;
 let catalogPromise = null;
 const schemaCache = readJSON(SCHEMAS_CACHE, {}); // url -> { at, schema }
@@ -159,12 +164,14 @@ const capsById = {}; // variantId -> caps
 function familyByKey(key) { return families.find((f) => f.key === key); }
 function vfamilyByKey(key) { return vfamilies.find((f) => f.key === key); }
 function afamilyByKey(key) { return afamilies.find((f) => f.key === key); }
+function dfamilyByKey(key) { return dfamilies.find((f) => f.key === key); }
 // imagens, vídeos e áudios leem o schema de jeitos diferentes
-const analyze = (variant, schema) => (variant.tool ? tools.analyze(schema, variant.tool) : variant.audio ? amapper.analyze(schema) : variant.video ? vmapper.analyze(schema, variant.kind) : mapper.analyzeSchema(schema));
+const analyze = (variant, schema) => (variant.tool ? tools.analyze(schema, variant.tool) : variant.d3 ? dmapper.analyze(schema) : variant.audio ? amapper.analyze(schema) : variant.video ? vmapper.analyze(schema, variant.kind) : mapper.analyzeSchema(schema));
 
 function ensureVideoDefaults() {
   if (!Array.isArray(config.enabledVideo) && vfamilies.length) { config.enabledVideo = vmapper.defaultEnabled(vfamilies); saveConfig(); }
   if (!Array.isArray(config.enabledAudio) && afamilies.length) { config.enabledAudio = amapper.defaultEnabled(afamilies); saveConfig(); }
+  if (!Array.isArray(config.enabled3d) && dfamilies.length) { config.enabled3d = dmapper.defaultEnabled(dfamilies); saveConfig(); }
 }
 
 async function refreshCatalog(force = false) {
@@ -178,6 +185,7 @@ async function refreshCatalog(force = false) {
         families = mapper.buildFamilies(models);
         vfamilies = vmapper.buildFamilies(models);
         afamilies = amapper.buildFamilies(models);
+        dfamilies = dmapper.buildFamilies(models);
         writeJSON(MODELS_CACHE, catalog, 0);
         catalogError = null;
         if (!Array.isArray(config.enabled)) { config.enabled = mapper.defaultEnabled(families); saveConfig(); }
@@ -255,6 +263,36 @@ function afamilyView(f) {
     key: f.key, name: f.name, provider: f.provider, avatar: f.avatar, kind: f.kind,
     price: v.price, unit: v.unit, caps: amapper.publicCaps(capsById[v.id]), enabled: (config.enabledAudio || []).includes(f.key),
   };
+}
+
+// Preço de uma geração 3D com as opções padrão, para a lista de modelos. O preço de tabela desses modelos
+// é um valor por crédito: só a cotação do Atlas diz quanto custa. Fica guardado por algumas horas.
+const baseQuotes = new Map(); // id da variante -> { at, price }
+async function baseQuote(variant) {
+  const hit = baseQuotes.get(variant.id);
+  if (hit && Date.now() - hit.at < 6 * 3600e3) return hit.price;
+  const caps = capsById[variant.id];
+  if (!config.apiKey || !caps || !caps.usable) return null;
+  const built = dmapper.buildBody(variant.id, caps, variant.kind === 'text' ? 'text' : 'image', { prompt: 'object', images: [{ url: `${PLACEHOLDER}.png`, slot: 'front' }] });
+  if (built.error) return null;
+  const q = await quoteFor(built.body, null);
+  if (q.price != null) baseQuotes.set(variant.id, { at: Date.now(), price: q.price });
+  return q.price;
+}
+
+function dfamilyView(f) {
+  const variants = {};
+  for (const [k, v] of Object.entries(f.variants)) {
+    variants[k] = { id: v.id, price: baseQuotes.get(v.id)?.price ?? null, caps: dmapper.publicCaps(capsById[v.id]) };
+  }
+  return { key: f.key, name: f.name, provider: f.provider, avatar: f.avatar, variants, enabled: (config.enabled3d || []).includes(f.key) };
+}
+
+let d3Warm = null; // carga em segundo plano de todos os modelos 3D
+// Carrega os schemas e os preços base das famílias 3D pedidas
+async function load3d(fams) {
+  await Promise.allSettled(fams.map(familyCaps));
+  await Promise.allSettled(fams.flatMap((f) => Object.values(f.variants)).map(baseQuote));
 }
 
 /* ------------------------------------------------------------------ */
@@ -467,6 +505,7 @@ async function runItem(batch, item) {
   if (batch.tool) return runToolItem(batch, item);
   if (batch.kind === 'video') return runVideoItem(batch, item);
   if (batch.kind === 'audio') return runAudioItem(batch, item);
+  if (batch.kind === '3d') return run3dItem(batch, item);
   if (!config.apiKey) return fail(batch, item, 'Configure sua API key do Atlas Cloud.');
   Object.assign(item, { status: 'running', error: null, startedAt: Date.now(), finishedAt: null, outputs: [], predictionId: null, cost: null });
   emitBatch(batch);
@@ -727,6 +766,204 @@ function newVideoBatch({ prompt, mode, inputs, familyKeys, ratio, res, duration,
   return batch;
 }
 
+/* ---------- 3D ---------- */
+
+// Pedido 3D já limpo. modos: text (texto → 3D) e image (uma ou mais vistas do mesmo objeto → 3D)
+//   images: [{ id, slot }] com slot = front | back | left | right
+//   options: { família: { opção: valor } }; nas opções de imagem o valor é { ref } ou { refs: [] }
+function d3Request(b) {
+  const mode = dmapper.MODES.includes(b.mode) ? b.mode : 'text';
+  const images = [];
+  if (mode === 'image') {
+    for (const x of Array.isArray(b.images) ? b.images : []) {
+      const ref = refOf(x && typeof x === 'object' ? x.id || x.ref : x);
+      if (!ref || ref.kind !== 'image' || images.some((i) => i.id === ref.id)) continue;
+      images.push({ ...ref, slot: dmapper.VIEW_SLOTS.includes(x && x.slot) ? x.slot : dmapper.VIEW_SLOTS.find((s) => !images.some((i) => i.slot === s)) || 'front' });
+    }
+  }
+  const options = {};
+  const keys = (Array.isArray(b.families) ? b.families : []).filter((k) => typeof k === 'string');
+  for (const key of keys) {
+    const src = b.options && typeof b.options[key] === 'object' && b.options[key] ? b.options[key] : {};
+    const clean = {};
+    for (const [k, v] of Object.entries(src)) {
+      if (!/^[\w-]{1,60}$/.test(k) || v === undefined || v === null) continue;
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        const ids = (Array.isArray(v.refs) ? v.refs : v.ref ? [v.ref] : []).map((r) => refOf(r)).filter((r) => r && r.kind === 'image').map((r) => r.id);
+        if (ids.length) clean[k] = { refs: ids.slice(0, 8) };
+      } else clean[k] = Array.isArray(v) ? v.slice(0, 12).map((x) => String(x).slice(0, 40)) : typeof v === 'string' ? v.slice(0, 2000) : v;
+    }
+    if (Object.keys(clean).length) options[key] = clean;
+  }
+  return { mode, prompt: String(b.prompt || '').trim(), images, options, keys };
+}
+
+function d3Missing(r) {
+  if (r.mode === 'image') return r.images.length ? null : 'Adicione a imagem do objeto.';
+  return r.prompt ? null : 'Escreva um prompt.';
+}
+
+// Imagens que as opções de um modelo usam (textura de referência, máscara)
+const d3OptionRefs = (opts) => Object.values(opts || {}).flatMap((v) => (v && typeof v === 'object' && Array.isArray(v.refs) ? v.refs : []));
+
+// O que o mapeador precisa para montar o pedido de um modelo. url(id) devolve o endereço de cada imagem.
+function d3Input(r, key, url) {
+  const opts = r.options[key] || {};
+  const options = {}; const optionImages = {};
+  for (const [k, v] of Object.entries(opts)) {
+    if (v && typeof v === 'object' && Array.isArray(v.refs)) optionImages[k] = v.refs.map(url).filter(Boolean);
+    else options[k] = v;
+  }
+  return { prompt: r.prompt, images: r.images.map((i) => ({ url: url(i.id), slot: i.slot })), options, optionImages };
+}
+
+async function estimate3d(r) {
+  await ensureCatalog();
+  const need = { images: r.images.length };
+  const refs = [...r.images, ...r.keys.flatMap((k) => d3OptionRefs(r.options[k])).map(refOf).filter(Boolean)];
+  const items = await Promise.all(r.keys.map(async (key) => {
+    const fam = dfamilyByKey(key);
+    if (!fam) return { key, price: null, exact: false };
+    await familyCaps(fam);
+    const variant = dmapper.pickVariant(fam, capsById, r.mode, need);
+    if (!variant) return { key, price: null, exact: false, error: dmapper.whyNot(r.mode) };
+    // a cotação não olha o conteúdo: um prompt e um endereço fixos servem enquanto os arquivos sobem
+    const built = dmapper.buildBody(variant.id, capsById[variant.id], r.mode, d3Input({ ...r, prompt: r.prompt || 'object' }, key, (id) => freshUrl(refOf(id)) || `${PLACEHOLDER}.png`));
+    if (built.error) return { key, price: null, exact: false, error: built.error };
+    const quote = await quoteFor(built.body, null);
+    return { key, price: quote.price, exact: quote.exact, source: quote.source, used: built.used };
+  }));
+  return withPending(items, refs);
+}
+
+async function run3dItem(batch, item) {
+  if (!config.apiKey) return fail(batch, item, 'Configure sua API key do Atlas Cloud.');
+  Object.assign(item, { status: 'running', error: null, startedAt: Date.now(), finishedAt: null, outputs: [], thumb: undefined, mesh: undefined, predictionId: null, cost: null, note: undefined });
+  emitBatch(batch);
+  try {
+    await ensureCatalog();
+    const fam = dfamilyByKey(item.family);
+    if (!fam) throw new Error('Esse modelo não está mais disponível no Atlas Cloud.');
+    await familyCaps(fam);
+    const need = { images: batch.inputs.images.length };
+    const variant = dmapper.pickVariant(fam, capsById, batch.mode, need);
+    if (!variant) throw new Error(dmapper.whyNot(batch.mode));
+    const caps = capsById[variant.id];
+    const r = { prompt: batch.prompt, images: batch.inputs.images, options: batch.options || {} };
+    const ids = [...r.images.map((i) => i.id), ...d3OptionRefs(r.options[item.family])];
+    const urls = new Map(await Promise.all(ids.map(async (id) => [id, await remoteRef(id)])));
+    const { body, error, used } = dmapper.buildBody(variant.id, caps, batch.mode, d3Input(r, item.family, (id) => urls.get(id)));
+    if (error) throw new Error(error);
+    item.variantId = variant.id;
+    item.params = {};
+    for (const [k, v] of Object.entries(body)) {
+      if (k === 'model' || (typeof v === 'string' && /^(https?:|data:)/.test(v))) continue;
+      if (Array.isArray(v)) { if (!v.some((x) => /^(https?:|data:)/.test(String(x)))) item.params[k] = v.join(', '); } else if (typeof v !== 'object') item.params[k] = typeof v === 'string' && v.length > 120 ? `${v.slice(0, 117)}…` : v;
+    }
+    const notes = [];
+    if (batch.mode === 'image' && need.images > used.images) notes.push(used.images === 1 ? 'Esse modelo usou só a primeira imagem.' : `Esse modelo usou só ${used.images} das ${need.images} imagens.`);
+    if (used.promptCut) notes.push(`O prompt passou do limite desse modelo e foi cortado em ${used.promptCut} caracteres.`);
+    if (used.dropped.length) notes.push(`Ficaram de fora por não valerem nessa combinação: ${used.dropped.join(', ')}.`);
+    item.note = notes.join(' ') || undefined;
+    const quote = await quoteFor(body, null);
+    item.unitPrice = quote.price;
+    item.quoteExact = quote.exact;
+    item.quoteSource = quote.source;
+    const d = await limit(() => atlas.submit(config.apiKey, body));
+    item.predictionId = d.id;
+    emitBatch(batch);
+    await pollUntilDone(batch, item, d);
+  } catch (e) {
+    fail(batch, item, e.message);
+  }
+}
+
+// Nome amigável de cada arquivo que o modelo devolveu, tirado do endereço de origem
+function d3Label(src, ext, kind) {
+  const name = decodeURIComponent(String(src).split(/[?#]/)[0].split('/').pop() || '').toLowerCase();
+  if (kind === 'image') return /alpha|rgba|transparent/.test(name) ? 'Miniatura sem fundo' : /(^|[^a-z])(back|left|right|side)([^a-z]|$)|multi[-_]?view/.test(name) ? 'Miniatura de outro ângulo' : 'Miniatura';
+  if (kind === 'video') return 'Vídeo do modelo girando';
+  if (/pre[-_]?remesh/.test(name)) return 'Malha antes do remesh';
+  if (/geometry|white|untextured/.test(name)) return 'Só a geometria';
+  if (/keypoint/.test(name)) return 'Com marcadores';
+  return '';
+}
+
+async function finish3d(batch, item, d) {
+  const srcs = atlas.urlsOf(d);
+  if (!srcs.length) return fail(batch, item, 'O modelo terminou mas não devolveu nenhum arquivo.');
+  const day = dayKey(batch.createdAt);
+  const dir = path.join(MODELS3D, day);
+  await fsp.mkdir(dir, { recursive: true });
+  const outputs = [];
+  let n = 0;
+  const save = async (buf, ext, kind, src, label) => {
+    const file = `${item.id}_${n++}.${ext}`;
+    await fsp.writeFile(path.join(dir, file), buf);
+    const o = { url: `/media/models3d/${day}/${file}`, kind, ext, bytes: buf.length, remote: src && !src.startsWith('data:') ? src : null };
+    if (label) o.label = label;
+    if (ext === 'glb') { const info = meshfile.glbInfo(buf); if (info) o.mesh = info; }
+    outputs.push(o);
+  };
+  for (const src of srcs) {
+    try {
+      const { buf } = await download(src, 20 * 60e3); // malhas com milhões de polígonos passam fácil de 100 MB
+      const t = meshfile.sniff(buf, src.startsWith('data:') ? '' : src);
+      if (t.kind === 'zip') {
+        // Seed3D e alguns formatos chegam dentro de um .zip: o modelo sai dele; pacote com vários arquivos fica inteiro
+        const entries = meshfile.zipEntries(buf);
+        const inner = entries.map((e) => ({ e, ext: meshfile.extOf(e.name) })).filter((x) => meshfile.MODEL_EXTS.has(x.ext));
+        const glb = inner.find((x) => x.ext === 'glb');
+        if (entries.length === 1 && inner.length === 1) await save(meshfile.zipRead(buf, inner[0].e), inner[0].ext, 'model', src);
+        else {
+          if (glb) await save(meshfile.zipRead(buf, glb.e), 'glb', 'model', src);
+          await save(buf, 'zip', 'file', src, inner.length ? `Pacote com ${[...new Set(inner.map((x) => x.ext.toUpperCase()))].join(', ')} e texturas` : 'Pacote de arquivos');
+        }
+      } else if (t.kind === 'model' || t.kind === 'image' || t.kind === 'video') await save(buf, t.ext, t.kind, src, d3Label(src, t.ext, t.kind));
+      // o resto (metadados em JSON, por exemplo) não interessa
+    } catch { /* tenta os outros arquivos */ }
+  }
+  const models = outputs.filter((o) => o.kind === 'model');
+  if (!models.length && !outputs.some((o) => o.kind === 'video' || o.kind === 'file')) return fail(batch, item, 'Não consegui baixar o modelo 3D gerado.');
+  // o GLB vem primeiro: é o que o visualizador abre
+  const rank = (o) => (o.kind === 'model' ? (o.ext === 'glb' ? (o.label ? 1 : 0) : 2) : o.kind === 'file' ? 3 : o.kind === 'video' ? 4 : 5);
+  outputs.sort((a, b) => rank(a) - rank(b));
+  const thumb = outputs.find((o) => o.kind === 'image' && o.label === 'Miniatura') || outputs.find((o) => o.kind === 'image');
+  if (thumb) item.thumb = thumb.url;
+  const settled = applyCost(item, d, item.unitPrice);
+  if (!settled && item.quoteExact) item.costEstimated = false;
+  item.outputs = outputs;
+  item.status = 'done';
+  item.finishedAt = Date.now();
+  emitBatch(batch);
+  scheduleBalance();
+  if (!settled) settleCost(batch, item);
+}
+
+function new3dBatch(r, via) {
+  const batch = {
+    id: uid('b'),
+    kind: '3d',
+    createdAt: Date.now(),
+    prompt: r.prompt,
+    mode: r.mode,
+    inputs: { images: r.images },
+    options: r.options,
+    families: r.keys,
+    count: 1,
+    items: [],
+  };
+  for (const key of r.keys) {
+    const fam = dfamilyByKey(key);
+    batch.items.push({ id: uid('i'), family: key, familyName: fam?.name || key, avatar: fam?.avatar || '', status: 'queued', outputs: [], unitPrice: via?.prices?.[key] ?? null });
+  }
+  stampOrigin(batch, via);
+  db.batches.push(batch);
+  emitBatch(batch);
+  for (const item of batch.items) runItem(batch, item);
+  return batch;
+}
+
 /* ---------- áudio ---------- */
 
 // Pedido de áudio já limpo. modos: speech (fala), music, sfx (efeitos) e stt (transcrição)
@@ -777,8 +1014,15 @@ async function estimateAudio(r) {
     const variant = fam.variants.main;
     const caps = await capsFor(variant);
     const vref = voiceRefOf(r, key);
-    const built = amapper.buildBody(variant.id, caps, audioInput(r, key, fresh || `${PLACEHOLDER}.mp3`, vref ? freshUrl(vref) || `${PLACEHOLDER}.mp3` : null));
+    const inp = audioInput(r, key, fresh || `${PLACEHOLDER}.mp3`, vref ? freshUrl(vref) || `${PLACEHOLDER}.mp3` : null);
+    const built = amapper.buildBody(variant.id, caps, inp);
     if (built.error) return { key, price: null, exact: false, error: built.error };
+    // fala longa: gerada em partes, e o custo é a soma delas
+    const parts = r.mode === 'speech' ? amapper.textParts(caps, inp) : [];
+    if (parts.length > 1) {
+      const quote = await quoteParts(variant, parts.map((text) => amapper.buildBody(variant.id, caps, { ...inp, text }).body), parts);
+      return { key, price: quote.price, exact: quote.exact, source: quote.source, used: built.used, parts: parts.length };
+    }
     const table = amapper.tablePrice(variant, { text: r.prompt, seconds: built.used.duration || r.duration });
     const quote = await quoteFor(built.body, table);
     return { key, price: quote.price, exact: quote.exact, source: quote.source, used: built.used };
@@ -786,9 +1030,147 @@ async function estimateAudio(r) {
   return withPending(items, [r.input, ...voiceRefs].filter(Boolean));
 }
 
+// Cotação de uma fala em partes: a soma das cotações de cada pedido
+async function quoteParts(variant, bodies, parts) {
+  const quotes = await Promise.all(bodies.map((body, i) => quoteFor(body, amapper.tablePrice(variant, { text: parts[i] }))));
+  if (quotes.some((q) => q.price == null)) return { price: null, exact: false, source: 'table' };
+  return {
+    price: Math.round(quotes.reduce((s, q) => s + q.price, 0) * 1e6) / 1e6,
+    exact: quotes.every((q) => q.exact),
+    source: quotes.every((q) => q.source === 'atlas') ? 'atlas' : 'table',
+  };
+}
+
+// Espera uma geração terminar e devolve a resposta do Atlas; se falhar, lança o erro do modelo
+async function waitPrediction(id, first, alive, maxMin = 20) {
+  let d = first || {};
+  let misses = 0;
+  const started = Date.now();
+  for (let i = 0; ; i++) {
+    const status = String(d.status || '').toLowerCase();
+    if (status === 'completed' || status === 'succeeded') return d;
+    if (atlas.TERMINAL_FAIL.has(status)) throw new Error(friendlyFail(atlas.errorText(d.error)));
+    if (!alive()) throw Object.assign(new Error('Geração apagada.'), { gone: true });
+    if (Date.now() - started > maxMin * 60e3) throw new Error(`A geração passou de ${maxMin} minutos e foi abandonada.`);
+    await sleep(i < 4 ? 1200 : i < 20 ? 2000 : 3500);
+    try {
+      d = await atlas.prediction(config.apiKey, id);
+      misses = 0;
+    } catch (e) {
+      if ((e.status && e.status < 500 && e.status !== 429) || ++misses > 6) throw e;
+    }
+  }
+}
+
+// Falha passageira do provedor (demora, conexão cortada): vale tentar de novo
+const TRANSIENT_RE = /upstream|time[d ]?\s?out|did not return|cut near|temporar|try again|overload|unavailable|rate limit|too many|\b50[234]\b/i;
+// O provedor não deu conta do tamanho do texto no tempo que tinha
+const TOO_LONG_RE = /too long|did not return audio|cut near/i;
+const PART_PARALLEL = 3; // partes da mesma fala geradas ao mesmo tempo
+
+// Texto maior do que o modelo aguenta num pedido (no ElevenLabs v4 a conexão cai perto de 60 s de síntese):
+// a fala é gerada em partes e os áudios são unidos num arquivo só.
+async function runAudioParts(batch, item, variant, caps, inp, parts) {
+  const alive = () => db.batches.includes(batch) && batch.items.includes(item);
+  const build = (text) => {
+    const r = amapper.buildBody(variant.id, caps, { ...inp, text });
+    if (r.error) throw new Error(r.error);
+    return r.body;
+  };
+  const bodies = parts.map(build);
+  item.variantId = variant.id;
+  item.params = { partes: parts.length };
+  for (const [k, v] of Object.entries(bodies[0])) if (k !== 'model' && typeof v !== 'object' && !(typeof v === 'string' && v.length > 80)) item.params[k] = v;
+  if (inp.voiceRefUrl) item.params.voz = 'clonada de um áudio';
+  const quote = await quoteParts(variant, bodies, parts);
+  item.unitPrice = quote.price;
+  item.quoteExact = quote.exact;
+  item.progress = { done: 0, total: parts.length };
+  emitBatch(batch);
+
+  const ids = []; // todos os pedidos feitos, para conferir o custo depois
+  let stop = null; // primeira falha definitiva: as partes que ainda não começaram não são pedidas
+  // Um pedido: envia, espera e baixa o áudio. Falha passageira é tentada de novo; se o provedor não dá conta
+  // do tamanho nem assim, a parte é dividida ao meio. Devolve os pedaços na ordem.
+  const generate = async (text, tries = 2) => {
+    if (stop) throw stop;
+    try {
+      const d0 = await limit(() => atlas.submit(config.apiKey, build(text), 'audio'));
+      ids.push(d0.id);
+      const d = await waitPrediction(d0.id, d0, alive);
+      const src = atlas.outputsOf(d)[0];
+      if (!src) throw new Error('O modelo terminou mas não devolveu áudio.');
+      const { buf, mime } = await download(src, 5 * 60e3);
+      const ext = audInfo(buf)?.ext || AUDIO_EXT[String(mime || '').split(';')[0]] || '';
+      return [{ d, buf, ext }];
+    } catch (e) {
+      if (e.gone || stop || !TRANSIENT_RE.test(e.message || '')) throw e;
+      if (tries > 1) return generate(text, tries - 1);
+      const halves = TOO_LONG_RE.test(e.message) && text.length > 600 ? amapper.splitText(text, Math.ceil(text.length / 2) + 80) : [];
+      if (halves.length < 2) throw e;
+      const out = [];
+      for (const h of halves) out.push(...await generate(h, 2));
+      return out;
+    }
+  };
+  const results = new Array(parts.length);
+  let next = 0;
+  const worker = async () => {
+    while (!stop && next < parts.length) {
+      const i = next++;
+      try {
+        results[i] = await generate(parts[i]);
+        item.progress.done++;
+        if (alive()) emitBatch(batch);
+      } catch (e) {
+        if (!stop) stop = e.gone ? e : new Error(`Parte ${i + 1} de ${parts.length}: ${e.message}${results.some(Boolean) ? ' As partes que já tinham ficado prontas foram cobradas pelo Atlas Cloud.' : ''}`);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(PART_PARALLEL, parts.length) }, worker));
+  delete item.progress;
+  if (stop) { if (stop.gone) return; throw stop; }
+
+  const pieces = results.flat();
+  const day = dayKey(batch.createdAt);
+  const dir = path.join(AUDIO, day);
+  await fsp.mkdir(dir, { recursive: true });
+  const ext = pieces[0].ext;
+  const joined = AUDIO_EXTS.has(ext) && pieces.every((p) => p.ext === ext) ? audJoin.join(pieces.map((p) => p.buf), ext) : null;
+  const outputs = [];
+  const notes = [];
+  if (joined) {
+    const file = `${item.id}_0.${ext}`;
+    await fsp.writeFile(path.join(dir, file), joined);
+    outputs.push({ url: `/media/audio/${day}/${file}`, kind: 'audio', remote: null });
+    notes.push(`Texto longo: gerado em ${pieces.length} partes e unido num áudio só.`);
+  } else {
+    // formato que o app não sabe unir: ficam as partes, na ordem
+    for (const [i, p] of pieces.entries()) {
+      const file = `${item.id}_${i}.${AUDIO_EXTS.has(p.ext) ? p.ext : 'mp3'}`;
+      await fsp.writeFile(path.join(dir, file), p.buf);
+      outputs.push({ url: `/media/audio/${day}/${file}`, kind: 'audio', remote: null });
+    }
+    notes.push(`Texto longo: gerado em ${pieces.length} partes. O formato desse modelo não dá para unir aqui; as faixas estão na ordem.`);
+  }
+  // custo: a soma do que o Atlas cobrou por cada pedido; enquanto ele não informa todos, vale a cotação
+  const prices = pieces.map((p) => chargedPrice(p.d));
+  const settled = prices.every((p) => p != null);
+  item.cost = settled ? Math.round(prices.reduce((s, p) => s + p, 0) * 1e6) / 1e6 : item.unitPrice ?? null;
+  item.costEstimated = !settled && !item.quoteExact;
+  item.partIds = ids;
+  item.outputs = outputs;
+  item.note = notes.join(' ');
+  item.status = 'done';
+  item.finishedAt = Date.now();
+  emitBatch(batch);
+  scheduleBalance();
+  if (!settled) settleCost(batch, item);
+}
+
 async function runAudioItem(batch, item) {
   if (!config.apiKey) return fail(batch, item, 'Configure sua API key do Atlas Cloud.');
-  Object.assign(item, { status: 'running', error: null, startedAt: Date.now(), finishedAt: null, outputs: [], text: null, predictionId: null, cost: null, note: undefined });
+  Object.assign(item, { status: 'running', error: null, startedAt: Date.now(), finishedAt: null, outputs: [], text: null, predictionId: null, partIds: undefined, progress: undefined, cost: null, note: undefined });
   emitBatch(batch);
   try {
     await ensureCatalog();
@@ -803,6 +1185,8 @@ async function runAudioItem(batch, item) {
     const { body, error, used } = amapper.buildBody(variant.id, caps, inp);
     if (error) throw new Error(error);
     if (vref && !used.voiceRef) throw new Error('Esse modelo não usa um áudio como voz de referência.');
+    const parts = batch.mode === 'speech' ? amapper.textParts(caps, inp) : [];
+    if (parts.length > 1) return await runAudioParts(batch, item, variant, caps, inp, parts);
     item.variantId = variant.id;
     item.params = {};
     for (const [k, v] of Object.entries(body)) if (k !== 'model' && typeof v !== 'object' && !(typeof v === 'string' && v.length > 80)) item.params[k] = v;
@@ -955,10 +1339,11 @@ async function pollUntilDone(batch, item, first, retry) {
   const started = Date.now();
   const video = batch.kind === 'video';
   const audio = batch.kind === 'audio';
-  const maxMin = video ? 45 : audio ? 20 : 15; // vídeo demora bem mais que imagem
+  const d3 = batch.kind === '3d';
+  const maxMin = video || d3 ? 45 : audio ? 20 : 15; // vídeo e 3D demoram bem mais que imagem
   for (let i = 0; ; i++) {
     const status = String(d.status || '').toLowerCase();
-    if (status === 'completed' || status === 'succeeded') return video ? finishVideo(batch, item, d) : audio ? finishAudio(batch, item, d) : finish(batch, item, d);
+    if (status === 'completed' || status === 'succeeded') return video ? finishVideo(batch, item, d) : audio ? finishAudio(batch, item, d) : d3 ? finish3d(batch, item, d) : finish(batch, item, d);
     if (atlas.TERMINAL_FAIL.has(status)) {
       const msg = atlas.errorText(d.error);
       if (retry && retry(msg)) return;
@@ -966,7 +1351,7 @@ async function pollUntilDone(batch, item, first, retry) {
     }
     if (!db.batches.includes(batch) || !batch.items.includes(item)) return; // apagado no meio
     if (Date.now() - started > maxMin * 60e3) return fail(batch, item, `A geração passou de ${maxMin} minutos e foi abandonada.`);
-    await sleep(i < 4 ? 1200 : i < 20 ? 2000 : video ? 5000 : 3500);
+    await sleep(i < 4 ? 1200 : i < 20 ? 2000 : video || d3 ? 5000 : 3500);
     try {
       d = await atlas.prediction(config.apiKey, item.predictionId);
       misses = 0;
@@ -1054,13 +1439,18 @@ function applyCost(item, d, expected) {
   return false;
 }
 
+// Pedidos que um item fez ao Atlas: um só, ou vários quando a fala foi gerada em partes
+const predictionIds = (item) => (Array.isArray(item.partIds) && item.partIds.length ? item.partIds : item.predictionId ? [item.predictionId] : []);
+
 // Volta a consultar a geração até o Atlas informar o preço cobrado, e corrige o custo registrado
 async function settleCost(batch, item, waits = [2500, 6000, 15000, 45000, 120000]) {
   for (const ms of waits) {
     await sleep(ms);
-    if (!db.batches.includes(batch) || !batch.items.includes(item) || item.status !== 'done' || !item.predictionId || !config.apiKey) return false;
+    const ids = predictionIds(item);
+    if (!db.batches.includes(batch) || !batch.items.includes(item) || item.status !== 'done' || !ids.length || !config.apiKey) return false;
     try {
-      const price = chargedPrice(await atlas.prediction(config.apiKey, item.predictionId));
+      const prices = await Promise.all(ids.map(async (id) => chargedPrice(await atlas.prediction(config.apiKey, id))));
+      const price = prices.every((p) => p != null) ? Math.round(prices.reduce((s, p) => s + p, 0) * 1e6) / 1e6 : null;
       if (price != null) {
         item.cost = price;
         item.costEstimated = false;
@@ -1081,7 +1471,7 @@ async function repairCosts() {
   const todo = [];
   for (const b of db.batches) {
     for (const it of b.items) {
-      if (it.status !== 'done' || !it.costEstimated || !it.predictionId || it.edited) continue;
+      if (it.status !== 'done' || !it.costEstimated || !predictionIds(it).length || it.edited) continue;
       if (now - (it.finishedAt || b.createdAt) > 14 * 86400e3 || now - (it.costCheckedAt || 0) < 86400e3) continue;
       todo.push([b, it]);
     }
@@ -1131,15 +1521,16 @@ function newBatch({ prompt, refs, familyKeys, ratio, tier, count, via }) {
 }
 
 async function removeOutputs(item) {
-  for (const o of item.outputs || []) {
-    const full = localOutputPath(o.url);
+  for (const url of [...(item.outputs || []).map((o) => o.url), item.thumb].filter(Boolean)) {
+    const full = localOutputPath(url);
     if (full) await fsp.unlink(full).catch(() => {});
   }
 }
 
 // Caminho no disco de uma saída salva pelo app (null se ela só existe no Atlas)
 function localOutputPath(url) {
-  for (const [prefix, base] of [['/media/images/', IMAGES], ['/media/videos/', VIDEOS], ['/media/audio/', AUDIO]]) {
+  url = String(url).split(/[?#]/)[0];
+  for (const [prefix, base] of [['/media/images/', IMAGES], ['/media/videos/', VIDEOS], ['/media/audio/', AUDIO], ['/media/models3d/', MODELS3D]]) {
     if (!url.startsWith(prefix)) continue;
     const full = path.normalize(path.join(base, url.slice(prefix.length)));
     return full.startsWith(base) ? full : null;
@@ -1172,6 +1563,7 @@ const TYPES = {
   '.webp': 'image/webp', '.gif': 'image/gif', '.avif': 'image/avif', '.bmp': 'image/bmp', '.ico': 'image/x-icon', '.txt': 'text/plain',
   '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm',
   '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.opus': 'audio/ogg', '.flac': 'audio/flac', '.m4a': 'audio/mp4', '.aac': 'audio/aac',
+  ...Object.fromEntries(Object.entries(meshfile.MIME).map(([ext, mime]) => [`.${ext}`, mime])),
 };
 
 function send(res, status, data) {
@@ -1227,7 +1619,7 @@ function maskKey(k) { return k ? `${k.slice(0, 4)}••••${k.slice(-4)}` : 
 function stateView() {
   return {
     config: {
-      hasKey: !!config.apiKey, keyHint: maskKey(config.apiKey), enabled: config.enabled || [], enabledVideo: config.enabledVideo || [], enabledAudio: config.enabledAudio || [], dataDir: DATA, background: BACKGROUND, ffmpeg: ffmpegOk,
+      hasKey: !!config.apiKey, keyHint: maskKey(config.apiKey), enabled: config.enabled || [], enabledVideo: config.enabledVideo || [], enabledAudio: config.enabledAudio || [], enabled3d: config.enabled3d || [], dataDir: DATA, background: BACKGROUND, ffmpeg: ffmpegOk,
       mcp: { ...config.mcp, script: path.join(ROOT, 'mcp.js') },
       // moeda em que a tela mostra os valores: 'usd' (padrão), 'brl' ou 'both'
       currency: wantsBrl() ? config.currency : 'usd',
@@ -1328,6 +1720,70 @@ route('GET', '/api/audio/models', async (req, res, url) => {
   send(res, 200, { families: afamilies.map(afamilyView), enabled: config.enabledAudio || [], at: catalog.at, error: catalogError });
 });
 
+route('GET', '/api/3d/models', async (req, res, url) => {
+  await ensureCatalog();
+  ensureVideoDefaults();
+  if (!dfamilies.length) return send(res, 200, { families: [], enabled: config.enabled3d || [], error: catalogError || 'Catálogo vazio.' });
+  const enabled = new Set(config.enabled3d || []);
+  // são poucos modelos: carrega todos, para as Configurações já mostrarem o preço de cada um
+  const all = url.searchParams.get('caps') === 'all';
+  await Promise.race([load3d(dfamilies.filter((f) => all || enabled.has(f.key))), sleep(all ? 14000 : 9000)]);
+  // o resto carrega em segundo plano, uma vez, e a tela é avisada quando os preços chegam
+  if (!all && !d3Warm) d3Warm = load3d(dfamilies).then(() => emit('catalog3d', {})).catch(() => {});
+  send(res, 200, { families: dfamilies.map(dfamilyView), enabled: config.enabled3d || [], at: catalog.at, error: catalogError });
+});
+
+route('POST', '/api/3d/generate', async (req, res) => {
+  const r = d3Request(await readJsonBody(req));
+  const missing = d3Missing(r);
+  if (missing) return send(res, 400, { error: missing });
+  if (!r.keys.length) return send(res, 400, { error: 'Escolha pelo menos um modelo.' });
+  if (!config.apiKey) return send(res, 400, { error: 'Configure sua API key do Atlas Cloud.' });
+  send(res, 200, new3dBatch(r));
+});
+
+route('POST', '/api/3d/estimate', async (req, res) => {
+  const items = await estimate3d(d3Request(await readJsonBody(req)));
+  send(res, 200, { items, pending: !!items.pending });
+});
+
+// Todos os arquivos de um modelo 3D num .zip só (o GLB, os outros formatos e as miniaturas)
+route('GET', '/api/items/([\\w-]+)/pack', async (req, res, url, m) => {
+  const { batch, item } = findItem(m[1]);
+  if (!item || batch.kind !== '3d' || item.status !== 'done') { res.writeHead(404); return res.end(); }
+  const files = [];
+  const taken = new Set();
+  for (const o of item.outputs) {
+    const full = localOutputPath(o.url);
+    if (!full) continue;
+    const base = o.kind === 'image' ? 'miniatura' : o.kind === 'video' ? 'video' : o.kind === 'file' ? 'pacote' : /antes do remesh/i.test(o.label || '') ? 'modelo-antes-do-remesh' : /geometria/i.test(o.label || '') ? 'modelo-so-geometria' : 'modelo';
+    let name = `${base}.${o.ext}`;
+    for (let n = 2; taken.has(name); n++) name = `${base}-${n}.${o.ext}`;
+    taken.add(name);
+    try { files.push({ name, buf: await fsp.readFile(full) }); } catch { /* arquivo que sumiu do disco: segue sem ele */ }
+  }
+  if (!files.length) { res.writeHead(404); return res.end(); }
+  const zip = meshfile.zipWrite(files);
+  res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Length': zip.length, 'Content-Disposition': `attachment; filename="modelo-3d-${item.id.slice(-6)}.zip"`, 'Cache-Control': 'no-store' });
+  res.end(zip);
+});
+
+// Miniatura de um modelo 3D: a tela desenha o modelo e manda a imagem para ficar na linha do tempo
+route('POST', '/api/items/([\\w-]+)/thumb', async (req, res, url, m) => {
+  const { batch, item } = findItem(m[1]);
+  if (!item || batch.kind !== '3d' || item.status !== 'done') return send(res, 404, { error: 'Modelo não encontrado.' });
+  const buf = await readBody(req, 4 * 1024 * 1024);
+  const meta = imgInfo(buf);
+  if (!meta || !['png', 'jpg', 'webp'].includes(meta.ext)) return send(res, 400, { error: 'Imagem inválida.' });
+  const day = dayKey(batch.createdAt);
+  const file = `${item.id}_capa.${meta.ext}`;
+  await fsp.mkdir(path.join(MODELS3D, day), { recursive: true });
+  await fsp.writeFile(path.join(MODELS3D, day, file), buf);
+  item.thumb = `/media/models3d/${day}/${file}?v=${Date.now().toString(36)}`;
+  emitBatch(batch);
+  send(res, 200, { thumb: item.thumb });
+});
+
 route('POST', '/api/audio/generate', async (req, res) => {
   const r = audioRequest(await readJsonBody(req));
   const missing = audioMissing(r);
@@ -1353,6 +1809,7 @@ route('PUT', '/api/config', async (req, res) => {
   const out = { ok: true };
   if (typeof body.apiKey === 'string') {
     config.apiKey = body.apiKey.trim();
+    d3Warm = null; // os preços dos modelos 3D dependem da chave: cota de novo
     balanceState = { value: null, currency: 'usd', at: 0, error: null };
     if (config.apiKey) {
       const b = await refreshBalance(true);
@@ -1371,6 +1828,12 @@ route('PUT', '/api/config', async (req, res) => {
     const newly = vfamilies.filter((f) => config.enabledVideo.includes(f.key));
     await Promise.race([Promise.allSettled(newly.map(familyCaps)), sleep(8000)]);
     out.videoFamilies = newly.map(vfamilyView);
+  }
+  if (Array.isArray(body.enabled3d)) {
+    config.enabled3d = body.enabled3d.filter((k) => typeof k === 'string');
+    const newly = dfamilies.filter((f) => config.enabled3d.includes(f.key));
+    await Promise.race([load3d(newly), sleep(8000)]);
+    out.d3Families = newly.map(dfamilyView);
   }
   if (Array.isArray(body.enabledAudio)) {
     config.enabledAudio = body.enabledAudio.filter((k) => typeof k === 'string');
@@ -1560,6 +2023,7 @@ route('POST', '/api/batches/([\\w-]+)/redo', async (req, res, url, m) => {
   const keys = Array.isArray(b.families) && b.families.length ? b.families : src.families;
   if (src.tool) return send(res, 200, await newToolBatch(src.tool, keys[0], src.toolRefs || {}));
   if (src.kind === 'audio') return send(res, 200, newAudioBatch(audioRequest({ ...src, families: keys })));
+  if (src.kind === '3d') return send(res, 200, new3dBatch(d3Request({ ...src, images: src.inputs.images, families: keys })));
   if (src.kind === 'video') {
     return send(res, 200, newVideoBatch({ prompt: src.prompt, mode: src.mode, inputs: videoInputs(src.mode, src.inputs), familyKeys: keys, ratio: src.ratio, res: src.res, duration: src.duration, audio: src.audio }));
   }
@@ -1582,6 +2046,7 @@ route('POST', '/api/items/([\\w-]+)/variation', async (req, res, url, m) => {
   if (!item) return send(res, 404, { error: 'Imagem não encontrada.' });
   if (batch.tool) return send(res, 200, await newToolBatch(batch.tool, item.family, batch.toolRefs || {}));
   if (batch.kind === 'audio') return send(res, 200, newAudioBatch(audioRequest({ ...batch, families: [item.family] })));
+  if (batch.kind === '3d') return send(res, 200, new3dBatch(d3Request({ ...batch, images: batch.inputs.images, families: [item.family] })));
   if (batch.kind === 'video') {
     return send(res, 200, newVideoBatch({ prompt: batch.prompt, mode: batch.mode, inputs: videoInputs(batch.mode, batch.inputs), familyKeys: [item.family], ratio: batch.ratio, res: batch.res, duration: batch.duration, audio: batch.audio }));
   }
@@ -1674,12 +2139,12 @@ route('DELETE', '/api/batches/([\\w-]+)', async (req, res, url, m) => {
 route('DELETE', '/api/days/(\\d{4}-\\d{2}-\\d{2})', async (req, res, url, m) => {
   const day = m[1];
   // cada aba apaga só o que é dela: imagens, vídeos ou áudios
-  const kind = ['video', 'audio'].includes(url.searchParams.get('kind')) ? url.searchParams.get('kind') : 'image';
+  const kind = ['video', 'audio', '3d'].includes(url.searchParams.get('kind')) ? url.searchParams.get('kind') : 'image';
   const mine = (b) => dayKey(b.createdAt) === day && (b.kind || 'image') === kind;
   const gone = db.batches.filter(mine);
   for (const b of gone) for (const it of b.items) await removeOutputs(it);
   db.batches = db.batches.filter((b) => !mine(b));
-  await fsp.rm(path.join(kind === 'video' ? VIDEOS : kind === 'audio' ? AUDIO : IMAGES, day), { recursive: true, force: true }).catch(() => {});
+  await fsp.rm(path.join(kind === 'video' ? VIDEOS : kind === 'audio' ? AUDIO : kind === '3d' ? MODELS3D : IMAGES, day), { recursive: true, force: true }).catch(() => {});
   saveDb();
   for (const b of gone) emit('batch-removed', { id: b.id });
   send(res, 200, { ok: true, removed: gone.length });
@@ -1712,7 +2177,7 @@ function ownMedia(src) {
   let p = m ? m[2] : src;
   if (!p.startsWith('/media/')) return null;
   try { p = decodeURIComponent(p.split(/[?#]/)[0]); } catch { return null; }
-  for (const [prefix, base] of [['/media/images/', IMAGES], ['/media/videos/', VIDEOS], ['/media/audio/', AUDIO], ['/media/refs/', REFS]]) {
+  for (const [prefix, base] of [['/media/images/', IMAGES], ['/media/videos/', VIDEOS], ['/media/audio/', AUDIO], ['/media/models3d/', MODELS3D], ['/media/refs/', REFS]]) {
     if (!p.startsWith(prefix)) continue;
     const full = path.normalize(path.join(base, p.slice(prefix.length)));
     return full.startsWith(base) ? full : null;
@@ -1751,8 +2216,12 @@ const agent = agentTools.create({
   baseUrl: () => `http://localhost:${activePort}`,
   spentToday: agentSpentToday,
   ensureCatalog: async () => { await ensureCatalog(); ensureVideoDefaults(); },
-  families: (kind) => (kind === 'video' ? vfamilies : kind === 'audio' ? afamilies : families),
-  enabledKeys: (kind) => (kind === 'video' ? config.enabledVideo : kind === 'audio' ? config.enabledAudio : config.enabled) || [],
+  families: (kind) => (kind === 'video' ? vfamilies : kind === 'audio' ? afamilies : kind === '3d' ? dfamilies : families),
+  enabledKeys: (kind) => (kind === 'video' ? config.enabledVideo : kind === 'audio' ? config.enabledAudio : kind === '3d' ? config.enabled3d : config.enabled) || [],
+  public3dCaps: dmapper.publicCaps,
+  pick3d: (fam, mode, need) => dmapper.pickVariant(fam, capsById, mode, need),
+  whyNot3d: dmapper.whyNot,
+  baseQuote, d3Request, d3Missing, estimate3d, new3dBatch,
   publicAudioCaps: amapper.publicCaps,
   audioRequest, estimateAudio, newAudioBatch,
   loadCaps: (fams) => Promise.race([Promise.allSettled(fams.map(familyCaps)), sleep(20000)]),
@@ -1821,6 +2290,7 @@ const server = http.createServer(async (req, res) => {
     if (p.startsWith('/media/images/')) return serveFile(req, res, IMAGES, p.slice('/media/images/'.length), 'public, max-age=31536000, immutable');
     if (p.startsWith('/media/videos/')) return serveFile(req, res, VIDEOS, p.slice('/media/videos/'.length), 'public, max-age=31536000, immutable');
     if (p.startsWith('/media/audio/')) return serveFile(req, res, AUDIO, p.slice('/media/audio/'.length), 'public, max-age=31536000, immutable');
+    if (p.startsWith('/media/models3d/')) return serveFile(req, res, MODELS3D, p.slice('/media/models3d/'.length), 'public, max-age=31536000, immutable');
     if (p.startsWith('/media/refs/')) return serveFile(req, res, REFS, p.slice('/media/refs/'.length), 'public, max-age=31536000, immutable');
     if (p === '/' || p === '/index.html') return serveFile(req, res, PUBLIC, 'index.html');
     return serveFile(req, res, PUBLIC, p.slice(1));

@@ -15,9 +15,11 @@
       <div class="composer-scroll">
         <div class="ratios vmodes only-video" id="vmodes" role="radiogroup" aria-label="Como criar o vídeo"></div>
         <div class="ratios vmodes amodes only-audio" id="amodes" role="radiogroup" aria-label="Que áudio criar"></div>
+        <div class="ratios vmodes dmodes only-3d" id="dmodes" role="radiogroup" aria-label="Como criar o modelo 3D"></div>
         <div class="refs none only-image" id="refs"></div>
         <div class="vmedia only-video" id="vmedia"></div>
         <div class="amedia only-audio" id="amedia"></div>
+        <div class="dmedia only-3d" id="dmedia"></div>
         <div class="prompt-wrap">
           <textarea class="prompt" id="prompt" placeholder="Descreva a imagem" spellcheck="true" aria-label="Prompt"></textarea>
           <button class="prompt-clear" id="prompt-clear" data-act="clear-prompt" data-tip="Limpar" aria-label="Limpar prompt"></button>
@@ -44,6 +46,7 @@
           <p class="vdur-note" id="vdur-note"></p>
         </div>
         <div class="seg-row wrap aopts only-audio" id="aopts"></div>
+        <div class="dopts only-3d" id="dopts"></div>
       </div>
       <div class="go-bar">
         <button class="go" id="go" data-act="generate"><span id="go-icon"></span><span id="go-label">Gerar</span><span class="est" id="go-est"></span></button>
@@ -52,6 +55,7 @@
       <input type="file" id="vfile-input" hidden>
       <input type="file" id="tool-file" accept="image/*,video/*" hidden>
       <input type="file" id="lib-file" accept="image/*" multiple hidden>
+      <input type="file" id="dfile-input" accept="image/*" multiple hidden>
       <input type="file" id="vp-file" accept="audio/*,video/mp4,video/quicktime,video/webm,.m4a,.mp3,.wav,.ogg,.flac,.opus,.aac" hidden>
       <input type="file" id="afile-input" accept="audio/*,video/mp4,video/quicktime,video/webm,.m4a,.mp3,.wav,.ogg,.flac,.opus,.aac" hidden>
     </aside>
@@ -69,6 +73,8 @@
   <script src="app.js"></script>
   <script src="video.js"></script>
   <script src="audio.js"></script>
+  <script src="viewer3d.js"></script>
+  <script src="tresd.js"></script>
   <script>boot();</script>
 </body>
 </html>

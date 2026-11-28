@@ -74,7 +74,9 @@ img { display: block; }
 }
 [hidden] { display: none !important; }
 /* abas Imagens / Vídeos: cada uma mostra só os controles dela */
-.tabs { flex: none; display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; margin: 14px 18px 0; padding: 3px; border-radius: 11px; background: var(--track); }
+/* quatro abas: cada uma ocupa o que o nome pede, para caberem numa linha só */
+.tabs { flex: none; display: flex; gap: 2px; margin: 14px 18px 0; padding: 3px; border-radius: 11px; background: var(--track); }
+.tabs button { flex: 1 1 auto; padding: 0 6px; white-space: nowrap; }
 .tabs button {
   height: 32px;
   border-radius: 8px;
@@ -87,6 +89,7 @@ img { display: block; }
 .tabs button.on { background: var(--field); color: var(--ink); box-shadow: var(--shadow-sm), 0 0 0 .5px rgba(0, 0, 0, .06); }
 .composer[data-tab="image"] .only-video, .composer[data-tab="video"] .only-image { display: none !important; }
 .composer[data-tab="audio"] .only-video, .composer[data-tab="audio"] .only-image, .composer:not([data-tab="audio"]) .only-audio { display: none !important; }
+.composer[data-tab="3d"] .only-video, .composer[data-tab="3d"] .only-image, .composer:not([data-tab="3d"]) .only-3d { display: none !important; }
 .composer-scroll {
   flex: 1;
   overflow-y: auto;
@@ -1066,3 +1069,97 @@ kbd { font: 600 11.5px/1 'Instrument Sans', system-ui, sans-serif; padding: 3px 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* ================================================================== */
+/* Aba 3D                                                              */
+/* ================================================================== */
+
+/* as quatro vistas do objeto */
+.dmedia:empty, .dopts:empty { display: none; }
+.dviews { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.dviews .vslot-wrap, .dviews .vslot { min-width: 0; }
+.dviews .vslot { aspect-ratio: 1; height: auto; flex: 1; padding: 0 2px; }
+.dviews .vslot > span { font-size: 11.5px; }
+.dviews .vslot-lib { right: 4px; bottom: 4px; }
+.dnote { margin: 8px 2px 0; font-size: 12px; line-height: 1.45; color: var(--muted); }
+
+/* opções de cada modelo */
+.dopts { display: flex; flex-direction: column; gap: 8px; }
+.dgroup { border-radius: 12px; background: var(--track); }
+.dgroup-head { width: 100%; display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px 0 10px; border-radius: 12px; font-size: 13px; font-weight: 600; color: var(--soft); text-align: left; }
+.dgroup-head:hover { color: var(--ink); }
+.dgroup-head .chev { flex: none; transition: transform .16s var(--ease); color: var(--faint); }
+.dgroup.open .dgroup-head .chev { transform: rotate(90deg); }
+.dgroup-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dgroup-count { flex: none; padding: 2px 8px; border-radius: 999px; background: var(--field); box-shadow: 0 0 0 1px var(--line); font-size: 11.5px; font-weight: 600; color: var(--ink); }
+.dgroup-body { display: flex; flex-direction: column; gap: 2px; padding: 0 6px 6px; }
+.dopt { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 34px; padding: 3px 6px; border-radius: 8px; }
+.dopt.wide { flex-direction: column; align-items: stretch; gap: 6px; padding: 7px 6px; }
+.dopt.set .dopt-name { color: var(--ink); }
+.dopt.set .dopt-name::after { content: ''; display: inline-block; width: 5px; height: 5px; margin-left: 6px; border-radius: 50%; background: var(--green); vertical-align: middle; }
+.dopt.off { opacity: .42; }
+.dopt.off :is(button, select, input, textarea) { pointer-events: none; }
+.dopt-name { font-size: 12.5px; font-weight: 500; color: var(--soft); cursor: help; }
+.dswitch { flex: none; display: inline-flex; padding: 4px 0; border-radius: 999px; }
+.dswitch:focus-visible .switch { box-shadow: 0 0 0 3px rgba(17, 17, 17, .12); }
+.dsel, .dnum, .dtext {
+  border: 0; outline: none; border-radius: 8px; background: var(--field); color: var(--ink);
+  box-shadow: var(--shadow-sm), 0 0 0 .5px rgba(0, 0, 0, .06); font: inherit; font-size: 12.5px; font-weight: 500;
+}
+.dsel { flex: none; max-width: 58%; height: 28px; padding: 0 8px; cursor: pointer; }
+.dnum { width: 92px; height: 28px; padding: 0 8px; text-align: right; -moz-appearance: textfield; appearance: textfield; }
+.dnum.wide { width: 120px; }
+.dnum::-webkit-outer-spin-button, .dnum::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.dnum::placeholder, .dtext::placeholder { color: var(--faint); font-weight: 400; }
+.dtext { width: 100%; padding: 7px 9px; line-height: 1.4; resize: vertical; min-height: 34px; }
+.dsel:focus, .dnum:focus, .dtext:focus { box-shadow: 0 0 0 2px var(--ink); }
+.drange { display: flex; align-items: center; gap: 10px; }
+.drange .range { flex: 1; min-width: 0; }
+.dchips { display: flex; flex-wrap: wrap; gap: 5px; }
+.dchips button { height: 26px; padding: 0 10px; border-radius: 999px; background: var(--field); box-shadow: 0 0 0 1px var(--line); font-size: 12px; font-weight: 600; color: var(--muted); transition: background .12s, color .12s; }
+.dchips button:hover { color: var(--ink); }
+.dchips button.on { background: var(--ink); color: #fff; box-shadow: none; }
+.dimgs { display: flex; flex-wrap: wrap; gap: 6px; }
+.dimg { position: relative; flex: none; width: 46px; height: 46px; border-radius: 9px; overflow: hidden; background: var(--field); box-shadow: 0 0 0 1px var(--line); display: grid; place-items: center; color: var(--muted); }
+.dimg img { width: 100%; height: 100%; object-fit: cover; }
+.dimg.uploading img { opacity: .45; }
+.dimg.add:hover { color: var(--ink); box-shadow: 0 0 0 1px var(--muted); }
+.dimg .rm { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; background: rgba(17, 17, 17, .72); color: #fff; opacity: 0; transition: opacity .12s; }
+.dimg:hover .rm, .dimg:focus-within .rm { opacity: 1; }
+.dimg .rm .svg { width: 11px; height: 11px; }
+.dgroup-reset { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; margin: 4px 6px 2px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.dgroup-reset:hover { color: var(--ink); }
+
+/* miniatura do modelo na linha do tempo */
+.tile.d3 { background: radial-gradient(120% 90% at 50% 30%, #fff 0%, #f1f1ef 62%, #e6e6e3 100%); }
+.tile.d3 > img { width: 100%; height: 100%; object-fit: contain; padding: 6%; }
+.d3-ph { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.d3-ph .svg { width: 30px; height: 30px; stroke-width: 1.4; }
+.d3-ph.big { position: static; }
+.d3-ph.big .svg { width: 64px; height: 64px; }
+.tile.d3 .tdur .svg { fill: none; stroke: currentColor; width: 11px; height: 11px; }
+
+/* janela do modelo */
+.lb-stage.d3-stage { padding: 0; background: radial-gradient(110% 85% at 50% 35%, #fff 0%, #f0f0ee 60%, #e2e2df 100%); }
+.d3-canvas { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; outline: none; }
+.d3-canvas:active { cursor: grabbing; }
+.d3-stage > img, .d3-stage > video { max-width: calc(100% - 56px); max-height: calc(100% - 120px); }
+.d3-load { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 0 40px; text-align: center; font-size: 13.5px; font-weight: 500; color: var(--muted); pointer-events: none; }
+.d3-bar { position: absolute; left: 50%; bottom: 40px; transform: translateX(-50%); display: flex; align-items: center; gap: 6px; padding: 5px; border-radius: 14px; background: rgba(255, 255, 255, .86); backdrop-filter: blur(10px); box-shadow: var(--shadow), 0 0 0 1px var(--line); }
+.d3-bar[hidden] { display: none; }
+.d3-bar .seg { background: transparent; }
+.d3-bar .toggle { height: 30px; background: transparent; }
+.d3-bar .toggle.on { background: var(--field); }
+.d3-help { position: absolute; left: 0; right: 0; bottom: 14px; margin: 0; text-align: center; font-size: 11.5px; color: var(--faint); pointer-events: none; }
+.d3-why { position: absolute; left: 28px; right: 28px; bottom: 22px; margin: 0; display: flex; align-items: flex-start; justify-content: center; gap: 8px; font-size: 13px; line-height: 1.45; color: var(--soft); }
+.d3-why .svg { flex: none; margin-top: 2px; }
+.d3-inputs { display: flex; gap: 6px; margin-bottom: 14px; }
+.d3-inputs img { width: 54px; height: 54px; object-fit: cover; border-radius: 9px; box-shadow: 0 0 0 1px var(--line); }
+.dfiles { display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px; }
+.dfile { display: flex; align-items: center; gap: 10px; height: 38px; padding: 0 10px 0 6px; border-radius: 10px; background: var(--track); color: var(--soft); font-size: 13px; text-align: left; transition: background .12s, color .12s; }
+.dfile:hover { background: var(--line); color: var(--ink); }
+.dfile.all { text-decoration: none; background: transparent; box-shadow: inset 0 0 0 1px var(--line); }
+.dfile-ext { flex: none; min-width: 44px; padding: 3px 6px; border-radius: 6px; background: var(--field); box-shadow: 0 0 0 1px var(--line); font-size: 10.5px; font-weight: 700; letter-spacing: .03em; text-align: center; color: var(--ink); }
+.dfile-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.dfile-size { flex: none; font-size: 12px; color: var(--muted); }
+.dfile > .svg { flex: none; color: var(--faint); }
